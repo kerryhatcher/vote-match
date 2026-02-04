@@ -595,9 +595,25 @@ def geocode(
     # Use default service if not specified
     service_name = service or settings.default_geocode_service
 
+    # Get geocoding service to check for service-specific batch size
+    try:
+        geocoding_service = GeocodeServiceRegistry.get_service(service_name, settings)
+    except ValueError as e:
+        typer.secho(str(e), fg=typer.colors.RED, bold=True)
+        typer.secho(
+            "\nUse 'vote-match geocode --service list' to see available services",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(code=1)
+
     # Use default batch size if not specified
+    # Priority: CLI flag > service-specific default > global default
     if batch_size is None:
-        batch_size = settings.default_batch_size
+        service_config = getattr(settings.geocode_services, service_name, None)
+        if service_config and hasattr(service_config, "batch_size") and service_config.batch_size:
+            batch_size = service_config.batch_size
+        else:
+            batch_size = settings.default_batch_size
 
     # Default behavior for only_unmatched
     # Census processes all ungeocoded voters, other services only process no_match
@@ -610,17 +626,6 @@ def geocode(
     )
 
     try:
-        # Get geocoding service
-        try:
-            geocoding_service = GeocodeServiceRegistry.get_service(service_name, settings)
-        except ValueError as e:
-            typer.secho(str(e), fg=typer.colors.RED, bold=True)
-            typer.secho(
-                "\nUse 'vote-match geocode --service list' to see available services",
-                fg=typer.colors.YELLOW,
-            )
-            raise typer.Exit(code=1)
-
         # Get database connection
         engine = get_engine(settings)
         session = get_session(engine)

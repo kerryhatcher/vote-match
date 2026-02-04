@@ -12,6 +12,7 @@ class ServiceConfig(BaseModel):
     enabled: bool = True
     timeout: int = 60
     rate_limit_delay: float = 0.0  # Seconds between requests
+    batch_size: Optional[int] = None  # Service-specific default batch size
 
 
 class CensusConfig(ServiceConfig):
@@ -29,6 +30,7 @@ class NominatimConfig(ServiceConfig):
     email: Optional[str] = None  # Required by usage policy
     rate_limit_delay: float = 1.0  # OSM requires 1 req/sec max
     timeout: int = 30
+    batch_size: int = 10  # Small batches for frequent progress saves
 
 
 class PhotonConfig(ServiceConfig):
