@@ -1,10 +1,60 @@
 """SQLAlchemy models for Vote Match application."""
 
-from sqlalchemy import Column, Float, Index, String
-from sqlalchemy.orm import declarative_base
+from datetime import datetime
+from typing import Optional
+
 from geoalchemy2 import Geometry
+from sqlalchemy import JSON, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+
+class GeocodeResult(Base):
+    """Stores geocoding results from any service.
+
+    This table supports multiple geocoding services by storing results
+    separately for each service. Each voter can have multiple results
+    from different services, and the best result is determined dynamically.
+    """
+
+    __tablename__ = "geocode_results"
+
+    id = Column(Integer, primary_key=True)
+    voter_id = Column(
+        String,
+        ForeignKey("voters.voter_registration_number"),
+        nullable=False,
+        index=True,
+    )
+    service_name = Column(String(50), nullable=False, index=True)
+    status = Column(
+        String(20), nullable=False
+    )  # exact, interpolated, approximate, no_match, failed
+    longitude = Column(Float, nullable=True)
+    latitude = Column(Float, nullable=True)
+    matched_address = Column(Text, nullable=True)
+    match_confidence = Column(Float, nullable=True)  # 0.0-1.0
+    raw_response = Column(JSON, nullable=True)  # Service-specific data
+    error_message = Column(Text, nullable=True)
+    geocoded_at = Column(DateTime, nullable=False, default=func.now())
+
+    # Relationship
+    voter = relationship("Voter", back_populates="geocode_results")
+
+    # Composite index for efficient queries
+    __table_args__ = (
+        Index("idx_geocode_results_voter_service", "voter_id", "service_name"),
+        Index("idx_geocode_results_status", "status"),
+    )
+
+    def __repr__(self) -> str:
+        """String representation of GeocodeResult model."""
+        return (
+            f"<GeocodeResult(voter_id='{self.voter_id}', "
+            f"service='{self.service_name}', "
+            f"status='{self.status}')>"
+        )
 
 
 class Voter(Base):
