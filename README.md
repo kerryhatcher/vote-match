@@ -80,12 +80,12 @@ When you need to modify the database schema:
 
 | Command                              | Description                                                                  |
 | ------------------------------------ | ---------------------------------------------------------------------------- |
-| `vote-match db-migrate -m "message"` | Create a new migration file based on model changes                           |
-| `vote-match db-upgrade [revision]`   | Apply migrations (default: latest)                                            |
-| `vote-match db-downgrade <revision>` | Rollback to a specific migration revision                                     |
-| `vote-match db-current`              | Show the current migration revision                                           |
-| `vote-match db-history`              | List all available migrations                                                 |
-| `vote-match db-stamp <revision>`     | Mark database as being at a specific revision without running migrations      |
+| `vote-match db-migrate -m "message"` | Create a new migration file based on model changes                          |
+| `vote-match db-upgrade [revision]`   | Apply migrations (default: latest)                                           |
+| `vote-match db-downgrade <revision>` | Rollback to a specific migration revision                                    |
+| `vote-match db-current`              | Show the current migration revision                                          |
+| `vote-match db-history`              | List all available migrations                                                |
+| `vote-match db-stamp <revision>`     | Mark database as being at a specific revision without running migrations     |
 
 ### Migrating an Existing Database
 
