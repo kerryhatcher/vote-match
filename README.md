@@ -134,3 +134,16 @@ This tells Alembic that your database is already at the latest migration without
 - use twelve-factor methodology for configuration management.
 - use Ruff for linting and code quality checks.
 - use pytest for testing.
+
+
+## Notes
+
+https://www.freecodecamp.org/news/how-to-write-a-good-readme-file/
+https://clig.dev/#guidelines
+https://medium.com/@jdxcode/12-factor-cli-apps-dd3c227a0e46
+https://dev.to/wesen/14-great-tips-to-make-amazing-cli-applications-3gp3
+https://versent.com.au/blog/writing-a-good-readme-md-file/
+https://www.tilburgsciencehub.com/topics/collaborate-share/share-your-work/content-creation/readme-best-practices/
+https://github.com/arturtamborski/cli-best-practices
+https://medium.com/@kc_clintone/the-ultimate-guide-to-writing-a-great-readme-md-for-your-project-3d49c2023357
+https://no-color.org/
