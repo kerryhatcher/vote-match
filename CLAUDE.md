@@ -8,8 +8,18 @@ Vote Match is a Python tool for processing voter registration records for GIS ap
 
 1. Converting voter records from CSV format to PostGIS records
 2. Geocoding voter addresses using various geocoding services
-3. Matching voter records to precincts using spatial joins
-4. Generating reports on geocoding and matching success rates
+3. Syncing best geocoding results to the Voter table for QGIS visualization
+4. Matching voter records to precincts using spatial joins
+5. Generating reports on geocoding and matching success rates
+
+### Key CLI Commands
+
+- `vote-match init-db` - Initialize PostGIS database schema
+- `vote-match load-csv <file>` - Import voter registration CSV
+- `vote-match geocode --service <name>` - Geocode addresses using specified service (census, nominatim, etc.)
+- `vote-match sync-geocode` - **Required for QGIS**: Sync best geocoding results to Voter table
+- `vote-match status` - View geocoding statistics and progress
+- `vote-match export <file>` - Export voter data to CSV or GeoJSON
 
 ## Development Commands
 
@@ -61,6 +71,43 @@ Sample data is available in `sample.csv` for reference.
 - Python 3.13+
 - Uses `uv` for all Python operations (never use system `python` or `python3`)
 - Project managed via `pyproject.toml`
+
+## Geocoding Architecture
+
+Vote Match uses a multi-service geocoding architecture that supports cascading strategies:
+
+### Database Schema
+
+- **GeocodeResult table**: Stores geocoding results from multiple services
+  - One voter can have multiple results (one per service)
+  - Each result includes: service_name, status, coordinates, confidence, raw_response
+  - Status values: exact, interpolated, approximate, no_match, failed
+
+- **Voter table**: Contains voter data and best geocoding result
+  - `geom` column: PostGIS POINT geometry (required for QGIS visualization)
+  - Legacy `geocode_*` fields: For backward compatibility
+
+### Workflow
+
+1. **Geocode with services**: Results are saved to GeocodeResult table
+   - `vote-match geocode --service census` - Primary service
+   - `vote-match geocode --service nominatim` - Alternative for no_match records
+
+2. **Sync best results**: Updates Voter table for QGIS
+   - `vote-match sync-geocode` - Selects best result and updates `geom` column
+   - Best result determined by quality: exact > interpolated > approximate
+
+3. **QGIS visualization**: Connect to PostGIS and display voters layer
+   - The `geom` column must be populated via `sync-geocode` command
+
+### Adding New Geocoding Services
+
+New services are registered in `src/vote_match/geocoding/registry.py`:
+
+1. Create service class in `src/vote_match/geocoding/services/`
+2. Inherit from `GeocodeService` base class
+3. Implement `geocode_batch()` method
+4. Register with `@GeocodeServiceRegistry.register()` decorator
 
 ## Database Migrations
 

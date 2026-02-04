@@ -26,6 +26,97 @@ Address validating via USPS API. See [USPS API spec](docs/USPS_API_addresses-v3r
 - typer
 
 
+## Workflow
+
+### Typical Usage
+
+Vote Match processes voter registration data through several stages:
+
+#### 1. Initialize Database
+
+Create the database schema and PostGIS extension:
+
+```bash
+vote-match init-db
+```
+
+#### 2. Load Voter Data
+
+Import voter registration CSV file:
+
+```bash
+vote-match load-csv sample.csv
+```
+
+#### 3. Geocode Addresses
+
+Geocode voter addresses using the Census geocoding service (or other services):
+
+```bash
+# Use Census geocoder (default, processes all ungeocoded voters)
+vote-match geocode
+
+# Use alternative geocoding service for no_match records
+vote-match geocode --service nominatim
+
+# List available geocoding services
+vote-match geocode --service list
+```
+
+#### 4. Sync Results for QGIS
+
+After geocoding, sync the best results to the Voter table for QGIS visualization:
+
+```bash
+# Sync best geocoding results to PostGIS geometry column
+vote-match sync-geocode
+
+# Force update all voters (including those with existing geometry)
+vote-match sync-geocode --force
+```
+
+**Important**: The `sync-geocode` command is **required** for QGIS visualization. It:
+
+- Selects the best geocoding result from all services (exact > interpolated > approximate)
+- Updates the Voter table's PostGIS `geom` column
+- Allows QGIS to display voter locations on a map
+
+#### 5. Check Status
+
+View geocoding progress and statistics:
+
+```bash
+vote-match status
+```
+
+#### 6. QGIS Visualization
+
+After syncing, connect QGIS to your PostGIS database and add the `voters` layer to visualize geocoded voter locations.
+
+### Cascading Geocoding Strategy
+
+Vote Match supports multiple geocoding services with a cascading approach:
+
+1. **Census (Primary)**: Processes all ungeocoded voters
+2. **Alternative Services**: Process only `no_match` records from previous attempts
+3. **Best Result Selection**: Automatically selects highest quality result across all services
+
+Example workflow:
+
+```bash
+# Step 1: Geocode with Census (primary service)
+vote-match geocode --service census
+
+# Step 2: Try Nominatim for no_match records
+vote-match geocode --service nominatim
+
+# Step 3: Sync best results to QGIS
+vote-match sync-geocode
+
+# Step 4: Check results
+vote-match status
+```
+
 ## Database Migrations
 
 Vote Match uses Alembic for database schema migrations. This allows you to track and manage database schema changes over time.
