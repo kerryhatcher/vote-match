@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 from loguru import logger
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
-from sqlalchemy import delete, insert
+from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from vote_match.config import get_settings
