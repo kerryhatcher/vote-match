@@ -18,6 +18,7 @@ Vote Match is a Python tool for processing voter registration records for GIS ap
 - `vote-match load-csv <file>` - Import voter registration CSV
 - `vote-match geocode --service <name>` - Geocode addresses using specified service (census, nominatim, etc.)
 - `vote-match sync-geocode` - **Required for QGIS**: Sync best geocoding results to Voter table
+- `vote-match delete-geocode-results --service <name> --status <status>` - Delete geocoding results for retry
 - `vote-match status` - View geocoding statistics and progress
 - `vote-match export <file>` - Export voter data to CSV or GeoJSON
 
@@ -99,6 +100,34 @@ Vote Match uses a multi-service geocoding architecture that supports cascading s
 
 3. **QGIS visualization**: Connect to PostGIS and display voters layer
    - The `geom` column must be populated via `sync-geocode` command
+
+### Retrying Failed Geocodes
+
+If geocoding fails, you can delete the failed results and retry with the same or different service:
+
+1. **Delete failed results**: Remove previous failed attempts
+
+   ```bash
+   vote-match delete-geocode-results --service census --status failed
+   ```
+
+2. **Retry geocoding**: Use the cascading strategy to retry
+
+   ```bash
+   vote-match geocode --service census --only-unmatched --retry-failed
+   ```
+
+3. **Sync to Voter table**: Update geometry for QGIS visualization
+
+   ```bash
+   vote-match sync-geocode
+   ```
+
+**Common scenarios:**
+
+- Retry same service after transient errors: Delete `failed` status for that service
+- Try different service: Delete `no_match` status to allow new service to process
+- Reprocess everything: Use `--all` flag (with confirmation)
 
 ### Adding New Geocoding Services
 
