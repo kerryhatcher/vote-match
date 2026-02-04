@@ -242,15 +242,142 @@ def load_csv(
 @app.command()
 def geocode(
     batch_size: int = typer.Option(
-        None,
+        10000,
         "--batch-size",
         "-b",
-        help="Number of records to process per batch",
+        help="Records per API call (max 10000)",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Total records to process",
+    ),
+    retry_failed: bool = typer.Option(
+        False,
+        "--retry-failed",
+        help="Retry previously failed records",
     ),
 ) -> None:
-    """Geocode voter addresses using Census geocoding service."""
-    logger.info("geocode command called with batch_size: {}", batch_size)
-    typer.echo("Not implemented yet")
+    """Geocode voter addresses using US Census Batch Geocoder."""
+    logger.info(
+        "geocode command called with batch_size={}, limit={}, retry_failed={}",
+        batch_size,
+        limit,
+        retry_failed,
+    )
+
+    settings = get_settings()
+
+    try:
+        # Get database connection
+        engine = get_engine(settings)
+        session = get_session(engine)
+
+        try:
+            # Import processing module
+            from vote_match.processing import process_geocoding
+
+            # Process geocoding with progress indication
+            typer.echo("Starting geocoding process...")
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Geocoding addresses...", total=None)
+
+                # Process geocoding
+                stats = process_geocoding(
+                    session=session,
+                    settings=settings,
+                    batch_size=batch_size,
+                    limit=limit,
+                    retry_failed=retry_failed,
+                )
+
+                progress.update(task, completed=True)
+
+            # Display results
+            from rich.table import Table
+            from rich.console import Console
+
+            console = Console()
+
+            table = Table(title="Geocoding Results", show_header=True, header_style="bold magenta")
+            table.add_column("Status", style="cyan")
+            table.add_column("Count", justify="right", style="green")
+            table.add_column("Percentage", justify="right", style="yellow")
+
+            total = stats["total_processed"]
+            if total > 0:
+                table.add_row(
+                    "Matched",
+                    str(stats["matched"]),
+                    f"{stats['matched'] / total * 100:.1f}%",
+                )
+                table.add_row(
+                    "No Match",
+                    str(stats["no_match"]),
+                    f"{stats['no_match'] / total * 100:.1f}%",
+                )
+                table.add_row(
+                    "Failed",
+                    str(stats["failed"]),
+                    f"{stats['failed'] / total * 100:.1f}%",
+                )
+                table.add_row(
+                    "Total",
+                    str(total),
+                    "100.0%",
+                    style="bold",
+                )
+            else:
+                table.add_row("No records processed", "0", "0.0%")
+
+            console.print(table)
+
+            # Success message
+            if total > 0:
+                typer.secho(
+                    f"\n✓ Successfully processed {total:,} records",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+                if stats["matched"] > 0:
+                    typer.secho(
+                        f"  {stats['matched']:,} addresses geocoded successfully",
+                        fg=typer.colors.GREEN,
+                    )
+                if stats["no_match"] > 0:
+                    typer.secho(
+                        f"  {stats['no_match']:,} addresses could not be geocoded",
+                        fg=typer.colors.YELLOW,
+                    )
+                if stats["failed"] > 0:
+                    typer.secho(
+                        f"  {stats['failed']:,} records failed",
+                        fg=typer.colors.RED,
+                    )
+            else:
+                typer.secho(
+                    "No pending records to geocode",
+                    fg=typer.colors.YELLOW,
+                )
+
+        finally:
+            session.close()
+            engine.dispose()
+
+    except Exception as e:
+        logger.error("Geocoding failed: {}", str(e))
+        typer.secho(
+            f"✗ Geocoding failed: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command()

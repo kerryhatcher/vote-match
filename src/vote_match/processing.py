@@ -1,0 +1,223 @@
+"""Processing functions for geocoding voter records."""
+
+from geoalchemy2 import WKTElement
+from loguru import logger
+from sqlalchemy.orm import Session
+
+from vote_match.config import Settings
+from vote_match.geocoder import GeocodeResult, build_batch_csv, parse_response, submit_batch
+from vote_match.models import Voter
+
+
+def get_pending_voters(
+    session: Session,
+    limit: int | None = None,
+    retry_failed: bool = False,
+) -> list[Voter]:
+    """
+    Query voters that need geocoding.
+
+    Args:
+        session: SQLAlchemy session.
+        limit: Maximum number of voters to retrieve (None for all).
+        retry_failed: If True, also include voters with geocode_status='failed'.
+
+    Returns:
+        List of Voter objects that need geocoding.
+    """
+    query = session.query(Voter)
+
+    # Filter for pending voters
+    if retry_failed:
+        # Include both NULL and 'failed' status
+        query = query.filter(
+            (Voter.geocode_status.is_(None)) | (Voter.geocode_status == "failed")
+        )
+    else:
+        # Only NULL (never geocoded)
+        query = query.filter(Voter.geocode_status.is_(None))
+
+    # Order by registration number for consistent ordering
+    query = query.order_by(Voter.voter_registration_number)
+
+    # Apply limit if specified
+    if limit is not None:
+        query = query.limit(limit)
+
+    voters = query.all()
+    logger.info("Found {} pending voters (retry_failed={})", len(voters), retry_failed)
+
+    return voters
+
+
+def apply_geocode_results(
+    session: Session,
+    results: list[GeocodeResult],
+) -> int:
+    """
+    Apply geocoding results to voter records in the database.
+
+    Args:
+        session: SQLAlchemy session.
+        results: List of GeocodeResult objects to apply.
+
+    Returns:
+        Count of updated records.
+    """
+    updated_count = 0
+
+    for result in results:
+        # Find voter by registration number
+        voter = session.query(Voter).filter(
+            Voter.voter_registration_number == result.registration_number
+        ).first()
+
+        if not voter:
+            logger.warning("Voter {} not found in database", result.registration_number)
+            continue
+
+        # Update geocoding fields
+        voter.geocode_status = result.status
+        voter.geocode_match_type = result.match_type
+        voter.geocode_matched_address = result.matched_address
+        voter.geocode_longitude = result.longitude
+        voter.geocode_latitude = result.latitude
+        voter.geocode_tigerline_id = result.tigerline_id
+        voter.geocode_tigerline_side = result.tigerline_side
+        voter.geocode_state_fips = result.state_fips
+        voter.geocode_county_fips = result.county_fips
+        voter.geocode_tract = result.tract
+        voter.geocode_block = result.block
+
+        # Create PostGIS geometry if coordinates are present
+        if result.longitude is not None and result.latitude is not None:
+            wkt = f"POINT({result.longitude} {result.latitude})"
+            voter.geom = WKTElement(wkt, srid=4326)
+            logger.debug("Created geometry for voter {}: ({}, {})",
+                        result.registration_number,
+                        result.longitude,
+                        result.latitude)
+        else:
+            voter.geom = None
+
+        updated_count += 1
+
+    # Commit all updates
+    session.commit()
+    logger.info("Updated {} voter records with geocoding results", updated_count)
+
+    return updated_count
+
+
+def process_geocoding(
+    session: Session,
+    settings: Settings,
+    batch_size: int = 10000,
+    limit: int | None = None,
+    retry_failed: bool = False,
+) -> dict:
+    """
+    Process geocoding for pending voter records.
+
+    This function:
+    1. Retrieves pending voters from database
+    2. Splits them into batches for Census API
+    3. Geocodes each batch
+    4. Applies results back to database
+    5. Returns summary statistics
+
+    Args:
+        session: SQLAlchemy session.
+        settings: Application settings.
+        batch_size: Records per Census API call (max 10000).
+        limit: Total records to process (None for all pending).
+        retry_failed: If True, retry previously failed records.
+
+    Returns:
+        Dictionary with statistics:
+        - total_processed: Total records processed
+        - matched: Successfully geocoded records
+        - no_match: Records that couldn't be geocoded
+        - failed: Records that encountered errors
+    """
+    # Validate batch size
+    if batch_size > 10000:
+        logger.warning("Batch size {} exceeds Census API limit, using 10000", batch_size)
+        batch_size = 10000
+
+    # Initialize statistics
+    stats = {
+        "total_processed": 0,
+        "matched": 0,
+        "no_match": 0,
+        "failed": 0,
+    }
+
+    # Get pending voters
+    voters = get_pending_voters(session, limit=limit, retry_failed=retry_failed)
+
+    if not voters:
+        logger.info("No pending voters to geocode")
+        return stats
+
+    logger.info("Processing {} voters in batches of {}", len(voters), batch_size)
+
+    # Process in batches
+    for i in range(0, len(voters), batch_size):
+        batch = voters[i : i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (len(voters) + batch_size - 1) // batch_size
+
+        logger.info("Processing batch {}/{} ({} records)",
+                   batch_num,
+                   total_batches,
+                   len(batch))
+
+        try:
+            # Build CSV for this batch
+            csv_content = build_batch_csv(batch)
+
+            # Submit to Census API
+            response_text = submit_batch(csv_content, settings)
+
+            # Parse response
+            results = parse_response(response_text)
+
+            # Apply results to database
+            updated = apply_geocode_results(session, results)
+
+            # Update statistics
+            stats["total_processed"] += len(results)
+            for result in results:
+                if result.status == "matched":
+                    stats["matched"] += 1
+                elif result.status == "no_match":
+                    stats["no_match"] += 1
+                else:
+                    stats["failed"] += 1
+
+            logger.info("Batch {}/{} completed: {} matched, {} no_match, {} failed",
+                       batch_num,
+                       total_batches,
+                       sum(1 for r in results if r.status == "matched"),
+                       sum(1 for r in results if r.status == "no_match"),
+                       sum(1 for r in results if r.status == "failed"))
+
+        except Exception as e:
+            # On error, mark entire batch as failed
+            logger.error("Batch {}/{} failed: {}", batch_num, total_batches, str(e))
+
+            for voter in batch:
+                voter.geocode_status = "failed"
+                stats["failed"] += 1
+
+            session.commit()
+            stats["total_processed"] += len(batch)
+
+    logger.info("Geocoding complete: {} total, {} matched, {} no_match, {} failed",
+               stats["total_processed"],
+               stats["matched"],
+               stats["no_match"],
+               stats["failed"])
+
+    return stats
