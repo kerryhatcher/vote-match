@@ -16,12 +16,13 @@ Python is the primary programming language used.
 `UV` should be used to manage Python virtual environment and dependencies. IMPORTANT: DO NOT USE PIP or POETRY.
 PostGIS is used for spatial data storage and processing.
 GDAL is used for geospatial data manipulation.
-The primary interface is a command-line interface (CLI).
+The primary interface is a command-line interface (CLI). Use Typer to build and manage the CLI.
 
 ### Perfered Packages
 
 - pandas
 - loguru
+- typer
 
 
 ## Developer Conventions
@@ -35,3 +36,6 @@ The primary interface is a command-line interface (CLI).
 - Update the README.md file with any new features or changes.
 - Update CLAUDE.md with any important changes or notes for future reference.
 - use twelve-factor methodology for configuration management.
+- use Ruff for linting and code quality checks.
+- use pytest for testing.
+- 
