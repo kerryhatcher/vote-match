@@ -229,13 +229,34 @@ This tells Alembic that your database is already at the latest migration without
 
 ## Notes
 
-### Alternative Geocoding Services
+### Geocoding Services
 
-https://photon.komoot.io/
-https://pelias.io/
-https://addok.readthedocs.io/en/latest/
-https://developers.google.com/maps/documentation
-https://opencagedata.com/
-https://nominatim.org/release-docs/develop/api/Overview/
-https://geocode.maps.co/
-https://www.gisgraphy.com/index.php
+Vote Match supports multiple geocoding services with different characteristics:
+
+| Service       | Type       | Coverage  | Cost | Batch Support | API Key Required | Notes                                                         |
+| ------------- | ---------- | --------- | ---- | ------------- | ---------------- | ------------------------------------------------------------- |
+| **census**    | BATCH      | US only   | Free | Yes (CSV)     | No               | US Census Batch Geocoder - Primary service for US addresses  |
+| **geocodio**  | BATCH      | US/Canada | Paid | Yes (10,000)  | Yes              | Excellent batch support and accuracy                          |
+| **mapbox**    | BATCH      | Global    | Paid | Yes (1,000)   | Yes              | Mapbox Geocoding API v6 with global coverage                  |
+| **nominatim** | INDIVIDUAL | Global    | Free | No            | No               | OpenStreetMap-based, 1 req/sec rate limit, requires email     |
+| **photon**    | INDIVIDUAL | Global    | Free | No            | No               | Komoot/OSM-based, 1 req/sec recommended                       |
+| **google**    | INDIVIDUAL | Global    | Paid | No            | Yes              | Google Maps Geocoding API - Premium quality, expensive        |
+
+**Configuration:**
+
+All services are configured via environment variables. See [.env.example](.env.example) for configuration details.
+
+**Cost Considerations:**
+
+- **Free**: census, nominatim, photon
+- **Paid**: geocodio ($0.0005-$0.002 per lookup), mapbox ($0.0005 per lookup), google ($0.005 per lookup)
+
+**Additional Resources:**
+
+Other geocoding services that could be added in the future:
+
+- Pelias: <https://pelias.io/>
+- Addok: <https://addok.readthedocs.io/en/latest/>
+- OpenCage: <https://opencagedata.com/>
+- Geocode Maps: <https://geocode.maps.co/>
+- Gisgraphy: <https://www.gisgraphy.com/index.php>

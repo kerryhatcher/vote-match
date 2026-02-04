@@ -88,11 +88,31 @@ Vote Match uses a multi-service geocoding architecture that supports cascading s
   - `geom` column: PostGIS POINT geometry (required for QGIS visualization)
   - Legacy `geocode_*` fields: For backward compatibility
 
+### Available Geocoding Services
+
+Vote Match supports multiple geocoding services with different characteristics:
+
+**Free Services:**
+
+- **census** (BATCH): US Census Batch Geocoder - US only, batch processing, no API key required
+- **nominatim** (INDIVIDUAL): OpenStreetMap/Nominatim - Global, 1 req/sec rate limit, requires email in config
+- **photon** (INDIVIDUAL): Komoot/Photon - Global, free OSM-based service, 1 req/sec recommended
+
+**Paid Services:**
+
+- **geocodio** (BATCH): Geocodio API - US/Canada only, excellent batch support (up to 10,000 addresses), requires API key
+- **mapbox** (BATCH): Mapbox Geocoding v6 - Global coverage, batch support (up to 1000 addresses), requires access token
+- **google** (INDIVIDUAL): Google Maps Geocoding API - Global, premium quality, expensive, requires API key
+
 ### Workflow
 
 1. **Geocode with services**: Results are saved to GeocodeResult table
-   - `vote-match geocode --service census` - Primary service
-   - `vote-match geocode --service nominatim` - Alternative for no_match records
+   - `vote-match geocode --service census` - Primary free service (US only)
+   - `vote-match geocode --service geocodio` - Premium batch service (US/Canada)
+   - `vote-match geocode --service mapbox` - Premium batch service (global)
+   - `vote-match geocode --service nominatim` - Alternative free service for no_match records
+   - `vote-match geocode --service photon` - Alternative free service (global)
+   - `vote-match geocode --service google` - Premium individual service (expensive)
 
 2. **Sync best results**: Updates Voter table for QGIS
    - `vote-match sync-geocode` - Selects best result and updates `geom` column
