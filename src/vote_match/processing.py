@@ -899,12 +899,12 @@ def import_geojson_districts(
                 stats["skipped"] += 1
                 continue
 
-            # Extract required fields
-            district_id = properties.get("District")
-            name = properties.get("Name")
+            # Extract required fields (handle multiple possible property name formats)
+            district_id = properties.get("DISTRICTID") or properties.get("District")
+            name = properties.get("NAME") or properties.get("Name")
 
             if not district_id or not name:
-                logger.warning(f"Feature {idx}: Missing District or Name, skipping")
+                logger.warning(f"Feature {idx}: Missing DISTRICTID/District or NAME/Name, skipping")
                 stats["skipped"] += 1
                 continue
 
@@ -923,16 +923,16 @@ def import_geojson_districts(
             wkt = shapely_geom.wkt
             geom = WKTElement(wkt, srid=4326)
 
-            # Create district record
+            # Create district record (handle multiple possible property name formats)
             district = CountyCommissionDistrict(
                 district_id=district_id,
                 name=name,
-                rep_name=properties.get("Commissioner"),
-                party=properties.get("Party"),
-                district_url=properties.get("District_URL"),
-                email=properties.get("E_Mail"),
-                photo_url=properties.get("Photo_URL"),
-                rep_name_2=properties.get("Commissioner2"),
+                rep_name=properties.get("REPNAME1") or properties.get("Commissioner"),
+                party=properties.get("PARTY1") or properties.get("Party"),
+                district_url=properties.get("DISTRICTURL1") or properties.get("District_URL"),
+                email=properties.get("Email") or properties.get("E_Mail"),
+                photo_url=properties.get("Photo") or properties.get("Photo_URL"),
+                rep_name_2=properties.get("NAME2") or properties.get("Commissioner2"),
                 object_id=properties.get("OBJECTID"),
                 global_id=properties.get("GlobalID"),
                 creation_date=None,  # Would need to parse date string if present
@@ -997,13 +997,47 @@ def compare_voter_districts(
         """
         SELECT
             v.voter_registration_number,
-            v.county_precinct as registered_district,
+            v.first_name,
+            v.last_name,
+            v.middle_name,
+            v.suffix,
+            v.residence_street_number,
+            v.residence_pre_direction,
+            v.residence_street_name,
+            v.residence_street_type,
+            v.residence_post_direction,
+            v.residence_apt_unit_number,
+            v.residence_city,
+            v.residence_zipcode,
+            v.county_commission_district as registered_district,
             d.district_id as spatial_district,
             d.name as spatial_district_name,
-            ST_AsText(v.geom) as voter_location
+            ST_AsText(v.geom) as voter_location,
+            best_gr.service_name as geocode_service,
+            best_gr.status as geocode_status,
+            best_gr.match_confidence as geocode_confidence,
+            best_gr.matched_address as geocode_matched_address
         FROM voters v
         LEFT JOIN county_commission_districts d
             ON ST_Within(v.geom, d.geom)
+        LEFT JOIN LATERAL (
+            SELECT service_name, status, match_confidence, matched_address
+            FROM geocode_results gr
+            WHERE gr.voter_id = v.voter_registration_number
+                AND gr.longitude IS NOT NULL
+                AND gr.latitude IS NOT NULL
+            ORDER BY
+                CASE gr.status
+                    WHEN 'exact' THEN 1
+                    WHEN 'interpolated' THEN 2
+                    WHEN 'approximate' THEN 3
+                    WHEN 'no_match' THEN 4
+                    WHEN 'failed' THEN 5
+                    ELSE 6
+                END,
+                gr.match_confidence DESC NULLS LAST
+            LIMIT 1
+        ) best_gr ON true
         WHERE v.geom IS NOT NULL
         """
     )
