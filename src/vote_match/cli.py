@@ -1,11 +1,18 @@
 """Command-line interface for Vote Match using Typer."""
 
+from pathlib import Path
+
 import typer
 from loguru import logger
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
+from sqlalchemy import delete, insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from vote_match.config import get_settings
-from vote_match.database import init_database
+from vote_match.database import init_database, get_engine, get_session
 from vote_match.logging import setup_logging
+from vote_match.csv_reader import read_voter_csv, dataframe_to_dicts
+from vote_match.models import Voter
 
 app = typer.Typer(
     name="vote-match",
