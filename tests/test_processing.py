@@ -83,6 +83,74 @@ class TestGetPendingVoters:
         # Verify limit was applied
         mock_query.limit.assert_called_once_with(10)
 
+    def test_get_pending_voters_with_retry_no_match(self):
+        """Test retrieving voters including no_match status when retry_no_match=True."""
+        # Create mock session
+        session = Mock(spec=Session)
+        mock_query = Mock()
+
+        # Setup query chain
+        session.query.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.all.return_value = []
+
+        # Get pending voters with retry_no_match
+        get_pending_voters(session, limit=None, retry_failed=False, retry_no_match=True)
+
+        # Verify filter was called (filters for NULL or no_match)
+        mock_query.filter.assert_called_once()
+
+    def test_get_pending_voters_with_retry_failed_and_no_match(self):
+        """Test retrieving voters when both retry flags are True."""
+        # Create mock session
+        session = Mock(spec=Session)
+        mock_query = Mock()
+
+        # Setup query chain
+        session.query.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.all.return_value = []
+
+        # Get pending voters with both retry flags
+        get_pending_voters(session, limit=None, retry_failed=True, retry_no_match=True)
+
+        # Verify filter was called (filters for NULL, failed, or no_match)
+        mock_query.filter.assert_called_once()
+
+    def test_get_pending_voters_excludes_matched(self):
+        """Test that 'matched' status is never included regardless of flags."""
+        # Create mock session
+        session = Mock(spec=Session)
+        mock_query = Mock()
+
+        # Setup query chain
+        session.query.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+
+        # Mock voters - only return non-matched ones
+        voter1 = Mock(spec=Voter)
+        voter1.voter_registration_number = "1"
+        voter1.geocode_status = None
+
+        voter2 = Mock(spec=Voter)
+        voter2.voter_registration_number = "2"
+        voter2.geocode_status = "no_match"
+
+        mock_query.all.return_value = [voter1, voter2]
+
+        # Test with all flag combinations - matched should never be included
+        voters = get_pending_voters(session, limit=None, retry_failed=True, retry_no_match=True)
+
+        # Verify only non-matched voters are returned
+        assert len(voters) == 2
+        assert all(v.geocode_status != "matched" for v in voters)
+
 
 class TestApplyGeocodeResults:
     """Tests for apply_geocode_results function."""
@@ -413,3 +481,42 @@ class TestProcessGeocoding:
 
                         # Should be called twice (10000 + 5000)
                         assert mock_build.call_count == 2
+
+    @patch("vote_match.processing.get_pending_voters")
+    def test_process_geocoding_with_retry_no_match(self, mock_get_pending):
+        """Test that process_geocoding correctly passes retry_no_match to get_pending_voters."""
+        # Mock session and settings
+        session = Mock(spec=Session)
+        settings = Settings()
+
+        # Mock pending voters with no_match status
+        voter1 = Mock(spec=Voter)
+        voter1.voter_registration_number = "1"
+        voter1.geocode_status = "no_match"
+        mock_get_pending.return_value = [voter1]
+
+        # Mock the geocoding pipeline
+        with patch("vote_match.processing.build_batch_csv") as mock_build:
+            with patch("vote_match.processing.submit_batch") as mock_submit:
+                with patch("vote_match.processing.parse_response") as mock_parse:
+                    with patch("vote_match.processing.apply_geocode_results") as mock_apply:
+                        # Mock returns
+                        mock_build.return_value = "csv"
+                        mock_submit.return_value = "response"
+                        mock_parse.return_value = []
+                        mock_apply.return_value = 0
+
+                        # Process with retry_no_match=True
+                        process_geocoding(
+                            session=session,
+                            settings=settings,
+                            batch_size=10000,
+                            limit=None,
+                            retry_failed=False,
+                            retry_no_match=True,
+                        )
+
+                        # Verify get_pending_voters was called with correct parameters
+                        mock_get_pending.assert_called_once_with(
+                            session, limit=None, retry_failed=False, retry_no_match=True
+                        )

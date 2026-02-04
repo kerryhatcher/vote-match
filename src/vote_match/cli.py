@@ -256,15 +256,21 @@ def geocode(
     retry_failed: bool = typer.Option(
         False,
         "--retry-failed",
-        help="Retry previously failed records",
+        help="Retry previously failed records (API/batch errors)",
+    ),
+    retry_no_match: bool = typer.Option(
+        False,
+        "--retry-no-match",
+        help="Retry records with no geocoding match",
     ),
 ) -> None:
     """Geocode voter addresses using US Census Batch Geocoder."""
     logger.info(
-        "geocode command called with batch_size={}, limit={}, retry_failed={}",
+        "geocode command called with batch_size={}, limit={}, retry_failed={}, retry_no_match={}",
         batch_size,
         limit,
         retry_failed,
+        retry_no_match,
     )
 
     settings = get_settings()
@@ -309,6 +315,7 @@ def geocode(
                     batch_size=batch_size,
                     limit=limit,
                     retry_failed=retry_failed,
+                    retry_no_match=retry_no_match,
                 )
 
                 progress.update(task, completed=True)

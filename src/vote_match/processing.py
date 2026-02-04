@@ -2,6 +2,7 @@
 
 from geoalchemy2 import WKTElement
 from loguru import logger
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from vote_match.config import Settings
@@ -13,6 +14,7 @@ def get_pending_voters(
     session: Session,
     limit: int | None = None,
     retry_failed: bool = False,
+    retry_no_match: bool = False,
 ) -> list[Voter]:
     """
     Query voters that need geocoding.
@@ -21,19 +23,24 @@ def get_pending_voters(
         session: SQLAlchemy session.
         limit: Maximum number of voters to retrieve (None for all).
         retry_failed: If True, also include voters with geocode_status='failed'.
+        retry_no_match: If True, also include voters with geocode_status='no_match'.
 
     Returns:
         List of Voter objects that need geocoding.
     """
     query = session.query(Voter)
 
-    # Filter for pending voters
+    # Build filter conditions for geocode status
+    conditions = [Voter.geocode_status.is_(None)]  # Always include NULL (never geocoded)
+
     if retry_failed:
-        # Include both NULL and 'failed' status
-        query = query.filter((Voter.geocode_status.is_(None)) | (Voter.geocode_status == "failed"))
-    else:
-        # Only NULL (never geocoded)
-        query = query.filter(Voter.geocode_status.is_(None))
+        conditions.append(Voter.geocode_status == "failed")
+
+    if retry_no_match:
+        conditions.append(Voter.geocode_status == "no_match")
+
+    # Apply OR filter to include any matching condition
+    query = query.filter(or_(*conditions))
 
     # Order by registration number for consistent ordering
     query = query.order_by(Voter.voter_registration_number)
@@ -43,7 +50,12 @@ def get_pending_voters(
         query = query.limit(limit)
 
     voters = query.all()
-    logger.info("Found {} pending voters (retry_failed={})", len(voters), retry_failed)
+    logger.info(
+        "Found {} pending voters (retry_failed={}, retry_no_match={})",
+        len(voters),
+        retry_failed,
+        retry_no_match,
+    )
 
     return voters
 
@@ -117,6 +129,7 @@ def process_geocoding(
     batch_size: int = 10000,
     limit: int | None = None,
     retry_failed: bool = False,
+    retry_no_match: bool = False,
 ) -> dict:
     """
     Process geocoding for pending voter records.
@@ -134,6 +147,7 @@ def process_geocoding(
         batch_size: Records per Census API call (max 10000).
         limit: Total records to process (None for all pending).
         retry_failed: If True, retry previously failed records.
+        retry_no_match: If True, retry records with no geocoding match.
 
     Returns:
         Dictionary with statistics:
@@ -156,7 +170,9 @@ def process_geocoding(
     }
 
     # Get pending voters
-    voters = get_pending_voters(session, limit=limit, retry_failed=retry_failed)
+    voters = get_pending_voters(
+        session, limit=limit, retry_failed=retry_failed, retry_no_match=retry_no_match
+    )
 
     if not voters:
         logger.info("No pending voters to geocode")
