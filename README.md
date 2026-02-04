@@ -239,8 +239,3 @@ https://opencagedata.com/
 https://nominatim.org/release-docs/develop/api/Overview/
 https://geocode.maps.co/
 https://www.gisgraphy.com/index.php
-
-Photon
-Mapbox
-Google Maps Geocoding API
-Geocodio
