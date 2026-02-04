@@ -127,10 +127,13 @@ class NominatimGeocoder(GeocodeService):
                         "countrycodes": "us",  # Limit to US addresses
                     }
 
-                    # Add email if configured (required by usage policy)
-                    headers = {}
+                    # Build User-Agent header (required by Nominatim usage policy)
                     if self.nominatim_config.email:
-                        headers["User-Agent"] = f"VoteMatch/1.0 ({self.nominatim_config.email})"
+                        user_agent = f"VoteMatch/1.0 ({self.nominatim_config.email})"
+                    else:
+                        user_agent = "VoteMatch/1.0 (voter registration geocoding tool)"
+
+                    headers = {"User-Agent": user_agent}
 
                     response = client.get(
                         f"{self.nominatim_config.base_url}/search",
