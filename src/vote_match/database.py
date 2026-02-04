@@ -69,11 +69,24 @@ def init_database(drop_tables: bool, settings: Settings, run_migrations: bool = 
         if drop_tables:
             logger.warning("Dropping all existing tables and migration history")
             with engine.connect() as conn:
-                # Drop alembic_version table to clear migration history
-                conn.execute(text("DROP TABLE IF EXISTS alembic_version;"))
-                conn.commit()
-                logger.debug("Alembic version table dropped")
+                # Drop all indexes first
+                conn.execute(text("DROP INDEX IF EXISTS idx_voters_geom;"))
+                conn.execute(text("DROP INDEX IF EXISTS idx_voter_county;"))
+                conn.execute(text("DROP INDEX IF EXISTS idx_voter_county_precinct;"))
+                conn.execute(text("DROP INDEX IF EXISTS idx_voter_geocode_status;"))
+                conn.execute(text("DROP INDEX IF EXISTS idx_voter_usps_validation;"))
+                conn.execute(text("DROP INDEX IF EXISTS ix_voters_geocode_status;"))
+                conn.execute(text("DROP INDEX IF EXISTS ix_voters_usps_validation_status;"))
+                logger.debug("Voter indexes dropped")
 
+                # Drop alembic_version table to clear migration history
+                conn.execute(text("DROP TABLE IF EXISTS alembic_version CASCADE;"))
+                # Drop voters table with CASCADE to ensure all dependencies are dropped
+                conn.execute(text("DROP TABLE IF EXISTS voters CASCADE;"))
+                conn.commit()
+                logger.debug("Alembic version and voters tables dropped with CASCADE")
+
+            # Drop any remaining tables from metadata
             Base.metadata.drop_all(engine)
             logger.info("All tables dropped")
 
