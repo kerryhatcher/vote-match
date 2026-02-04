@@ -739,6 +739,139 @@ def geocode(
 
 
 @app.command()
+def sync_geocode(
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Maximum number of voters to process",
+    ),
+    force_update: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Update geometry even if already set",
+    ),
+    skip_legacy_fields: bool = typer.Option(
+        False,
+        "--skip-legacy-fields",
+        help="Don't update legacy geocode_* fields",
+    ),
+) -> None:
+    """Sync best geocoding results to Voter table for QGIS display.
+
+    This command updates the Voter table's PostGIS geometry column (geom)
+    with the best geocoding result from all services. Required for QGIS
+    visualization and spatial operations.
+
+    The best result is selected automatically based on quality:
+    exact > interpolated > approximate > no_match > failed
+
+    Examples:
+        vote-match sync-geocode                    # Sync all voters without geometry
+        vote-match sync-geocode --force            # Update all voters including those with geometry
+        vote-match sync-geocode --limit 1000       # Process first 1000 voters
+    """
+    logger.info(
+        f"sync-geocode command called with limit={limit}, force_update={force_update}, "
+        f"skip_legacy_fields={skip_legacy_fields}"
+    )
+
+    settings = get_settings()
+
+    try:
+        # Get database connection
+        engine = get_engine(settings)
+        session = get_session(engine)
+
+        try:
+            from vote_match.processing import sync_best_geocode_to_voters
+
+            # Display info
+            if force_update:
+                typer.echo("Strategy: Updating ALL voters (including those with existing geometry)")
+            else:
+                typer.echo("Strategy: Updating only voters without geometry")
+
+            if limit:
+                typer.echo(f"Limit: {limit}")
+            typer.echo("")
+
+            # Process sync with progress indication
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Syncing geocode results...", total=None)
+
+                # Sync results
+                stats = sync_best_geocode_to_voters(
+                    session=session,
+                    limit=limit,
+                    force_update=force_update,
+                    update_legacy_fields=not skip_legacy_fields,
+                )
+
+                progress.update(task, completed=True)
+
+            # Display results
+            from rich.console import Console
+            from rich.table import Table
+
+            console = Console()
+
+            table = Table(
+                title="Sync Results",
+                show_header=True,
+                header_style="bold magenta",
+            )
+            table.add_column("Status", style="cyan")
+            table.add_column("Count", justify="right", style="green")
+
+            table.add_row("Total Processed", str(stats["total_processed"]))
+            table.add_row("Updated", str(stats["updated"]), style="green")
+            table.add_row("Skipped (No Results)", str(stats["skipped_no_results"]), style="yellow")
+            table.add_row("Skipped (No Coords)", str(stats["skipped_no_coords"]), style="yellow")
+            if not force_update and stats["skipped_already_set"] > 0:
+                table.add_row(
+                    "Skipped (Already Set)", str(stats["skipped_already_set"]), style="yellow"
+                )
+
+            console.print(table)
+
+            # Success message
+            if stats["updated"] > 0:
+                typer.secho(
+                    f"\n✓ Successfully updated {stats['updated']:,} voter geometries",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+                typer.secho(
+                    "  Voters are now ready for QGIS visualization",
+                    fg=typer.colors.GREEN,
+                )
+            else:
+                typer.secho(
+                    "No voters needed geometry updates",
+                    fg=typer.colors.YELLOW,
+                )
+
+        finally:
+            session.close()
+            engine.dispose()
+
+    except Exception as e:
+        logger.error(f"Sync failed: {e}")
+        typer.secho(
+            f"✗ Sync failed: {e}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def validate_usps(
     limit: int | None = typer.Option(
         None,
