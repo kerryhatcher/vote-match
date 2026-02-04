@@ -1,7 +1,11 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "vote-match"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Python tool for processing voter registration records for GIS applications"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
