@@ -241,8 +241,8 @@ def load_csv(
 
 @app.command()
 def geocode(
-    batch_size: int = typer.Option(
-        10000,
+    batch_size: int | None = typer.Option(
+        None,
         "--batch-size",
         "-b",
         help="Records per API call (max 10000)",
@@ -268,6 +268,20 @@ def geocode(
     )
 
     settings = get_settings()
+
+    # Use default batch size if not specified
+    if batch_size is None:
+        batch_size = settings.default_batch_size
+        logger.debug("Using default batch size: {}", batch_size)
+
+    # Validate batch size
+    if batch_size > 10000:
+        typer.secho(
+            "Error: batch_size cannot exceed 10000 (Census API limit)",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
 
     try:
         # Get database connection
