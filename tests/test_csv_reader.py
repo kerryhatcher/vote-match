@@ -28,14 +28,15 @@ def minimal_csv_content() -> str:
 @pytest.fixture
 def full_csv_content() -> str:
     """
-    Provide CSV content with all 47 columns.
+    Provide CSV content with all 46 columns (as per COLUMN_MAP).
 
     Returns:
         CSV content as string
     """
     header = "Registration Number,Status,Last Name,First Name,Middle Name,Name Suffix,Birth Year,Race,Gender,Street Number,Street Direction,Street Name,Street Type,Apt/Unit #,City,Zipcode,Mail Address Line 1,Mail Address Line 2,Mail Address Line 3,Mail City,Mail State,Mail Zipcode,Mail Country,County,County Precinct,Congressional District,State Senate District,State House District,Judicial District,County Commission District,School District,Municipality,Last Vote Date,Last Party Voted,Original Registration Date,Date Changed,Absentee Type,Status Reason,Land District,Land Lot,Residence City,Residence Postal Code,Race Description,Precinct Split,Voter Status,Street Name Full"
-    row1 = "01234567,Active,DOE,JOHN,MICHAEL,JR,1985,W,M,123,N,MAIN,ST,APT 5,ATLANTA,30303,123 N MAIN ST APT 5,,,ATLANTA,GA,30303,,FULTON,01-001,05,38,55,ATLANTA,01,ATLANTA,ATLANTA,11/08/2022,DEM,01/15/2010,03/20/2023,,,,100,A,ATLANTA,30303,White,01-001-A,Active,MAIN"
-    row2 = "01234568,Active,SMITH,JANE,ANN,,1990,B,F,456,,OAK,AVE,,MARIETTA,30060,456 OAK AVE,,,MARIETTA,GA,30060,,COBB,02-002,06,39,56,MARIETTA,02,MARIETTA,MARIETTA,11/08/2022,REP,02/10/2012,,,,,150,B,MARIETTA,30060,Black,02-002-B,Active,OAK"
+    # 46 values to match 46 columns
+    row1 = "01234567,Active,DOE,JOHN,MICHAEL,JR,1985,W,M,123,N,MAIN,ST,APT 5,ATLANTA,30303,123 N MAIN ST APT 5,,,ATLANTA,GA,30303,,FULTON,01-001,05,38,55,ATLANTA,01,ATLANTA,ATLANTA,11/08/2022,DEM,01/15/2010,03/20/2023,,,100,A,ATLANTA,30303,White,01-001-A,Active,MAIN"
+    row2 = "01234568,Active,SMITH,JANE,ANN,,1990,B,F,456,,OAK,AVE,,MARIETTA,30060,456 OAK AVE,,,MARIETTA,GA,30060,,COBB,02-002,06,39,56,MARIETTA,02,MARIETTA,MARIETTA,11/08/2022,REP,02/10/2012,,,,150,B,MARIETTA,30060,Black,02-002-B,Active,OAK"
     return f"{header}\n{row1}\n{row2}\n"
 
 
@@ -109,8 +110,9 @@ def test_read_voter_csv_minimal(minimal_csv_file: Path):
 
     # Check data types (should all be strings or string dtype)
     for col in df.columns:
-        # pandas dtype=str creates StringDtype, which is acceptable
-        assert df[col].dtype == "object" or str(df[col].dtype) == "string"
+        # pandas dtype=str creates StringDtype with repr like 'str' or 'string'
+        dtype_str = str(df[col].dtype)
+        assert df[col].dtype == "object" or "str" in dtype_str.lower()
 
     # Check first record
     assert df.iloc[0]["Registration Number"] == "01234567"

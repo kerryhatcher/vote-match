@@ -131,9 +131,14 @@ def dataframe_to_dicts(df: pd.DataFrame) -> list[dict]:
     # Rename columns using the map
     df_mapped = df_mapped.rename(columns=COLUMN_MAP)
 
-    # Convert to list of dictionaries
-    # Using where() to replace NaN with None for database compatibility
-    records = df_mapped.where(pd.notna(df_mapped), None).to_dict("records")
+    # Convert to list of dictionaries and replace NaN with None
+    records = df_mapped.to_dict("records")
+
+    # Replace NaN values with None for database compatibility
+    for record in records:
+        for key, value in record.items():
+            if pd.isna(value):
+                record[key] = None
 
     logger.debug("Converted {} records to dictionaries", len(records))
 
