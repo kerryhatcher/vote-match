@@ -22,3 +22,14 @@ dev = [
     "pytest-cov>=7.0.0",
     "ruff>=0.15.0",
 ]
+
+[project.scripts]
+vote-match = "vote_match.cli:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=src/vote_match --cov-report=term-missing --cov-report=html"
