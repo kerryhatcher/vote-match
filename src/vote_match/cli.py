@@ -104,11 +104,145 @@ def init_db(
 
 @app.command()
 def load_csv(
-    csv_file: str = typer.Argument(..., help="Path to voter registration CSV file"),
+    csv_file: Path = typer.Argument(..., help="Path to voter registration CSV file"),
+    truncate: bool = typer.Option(
+        False,
+        "--truncate",
+        help="Clear all existing voter records before loading",
+    ),
 ) -> None:
     """Load voter registration data from CSV into the database."""
     logger.info("load-csv command called with file: {}", csv_file)
-    typer.echo("Not implemented yet")
+
+    settings = get_settings()
+
+    try:
+        # Read and validate CSV
+        typer.echo(f"Reading CSV file: {csv_file}")
+        df = read_voter_csv(str(csv_file))
+        total_records = len(df)
+        logger.info("Loaded {} records from CSV", total_records)
+
+        # Convert to dictionaries
+        records = dataframe_to_dicts(df)
+
+        # Get database connection
+        engine = get_engine(settings)
+        session = get_session(engine)
+
+        try:
+            # Truncate table if requested
+            if truncate:
+                typer.secho(
+                    "WARNING: About to delete all existing voter records!",
+                    fg=typer.colors.RED,
+                    bold=True,
+                )
+                confirm = typer.confirm("Are you sure you want to continue?")
+                if not confirm:
+                    typer.secho("Operation cancelled", fg=typer.colors.YELLOW)
+                    raise typer.Abort()
+
+                logger.warning("Truncating voters table")
+                session.execute(delete(Voter))
+                session.commit()
+                typer.secho("✓ Existing records deleted", fg=typer.colors.YELLOW)
+
+            # Insert records in batches with progress bar
+            batch_size = 1000
+            total_batches = (total_records + batch_size - 1) // batch_size
+            inserted_count = 0
+            updated_count = 0
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                transient=False,
+            ) as progress:
+                task = progress.add_task(
+                    "Loading records...",
+                    total=total_records,
+                )
+
+                for i in range(0, total_records, batch_size):
+                    batch = records[i : i + batch_size]
+                    batch_num = (i // batch_size) + 1
+
+                    logger.info(
+                        "Processing batch {}/{} ({} records)",
+                        batch_num,
+                        total_batches,
+                        len(batch),
+                    )
+
+                    # Use PostgreSQL's INSERT ... ON CONFLICT for upsert
+                    stmt = pg_insert(Voter).values(batch)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["voter_registration_number"],
+                        set_={
+                            col: stmt.excluded[col]
+                            for col in batch[0].keys()
+                            if col != "voter_registration_number"
+                        },
+                    )
+
+                    result = session.execute(stmt)
+                    session.commit()
+
+                    # Track inserts vs updates (approximate - PostgreSQL doesn't easily
+                    # distinguish, so we just count total operations)
+                    progress.update(task, advance=len(batch))
+
+                inserted_count = total_records  # Simplified tracking
+
+            session.close()
+            engine.dispose()
+
+            # Success message
+            typer.secho(
+                f"\n✓ Successfully loaded {total_records:,} records",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+            typer.secho(
+                f"  Database operation completed in {total_batches} batch(es)",
+                fg=typer.colors.GREEN,
+            )
+
+        except Exception as e:
+            session.rollback()
+            session.close()
+            engine.dispose()
+            raise
+
+    except FileNotFoundError as e:
+        logger.error("File not found: {}", str(e))
+        typer.secho(
+            f"✗ File not found: {csv_file}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    except ValueError as e:
+        logger.error("Validation error: {}", str(e))
+        typer.secho(
+            f"✗ CSV validation failed: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    except Exception as e:
+        logger.error("Failed to load CSV: {}", str(e))
+        typer.secho(
+            f"✗ Failed to load CSV: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command()

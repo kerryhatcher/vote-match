@@ -1,4 +1,4 @@
-# Vote Mtch
+# Vote Match
 script to process voter records for use in GIS.
 
 
