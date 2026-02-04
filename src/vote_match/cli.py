@@ -151,8 +151,6 @@ def load_csv(
             # Insert records in batches with progress bar
             batch_size = 1000
             total_batches = (total_records + batch_size - 1) // batch_size
-            inserted_count = 0
-            updated_count = 0
 
             with Progress(
                 SpinnerColumn(),
@@ -188,14 +186,10 @@ def load_csv(
                         },
                     )
 
-                    result = session.execute(stmt)
+                    session.execute(stmt)
                     session.commit()
 
-                    # Track inserts vs updates (approximate - PostgreSQL doesn't easily
-                    # distinguish, so we just count total operations)
                     progress.update(task, advance=len(batch))
-
-                inserted_count = total_records  # Simplified tracking
 
             session.close()
             engine.dispose()
@@ -211,7 +205,7 @@ def load_csv(
                 fg=typer.colors.GREEN,
             )
 
-        except Exception as e:
+        except Exception:
             session.rollback()
             session.close()
             engine.dispose()

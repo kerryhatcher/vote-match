@@ -1,6 +1,5 @@
 """Tests for CSV reader module."""
 
-from io import StringIO
 from pathlib import Path
 
 import pandas as pd
