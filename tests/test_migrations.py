@@ -51,7 +51,9 @@ class TestInitDbWithMigrations:
         try:
             # Verify alembic_version table does NOT exist
             tables = inspector.get_table_names()
-            assert "alembic_version" not in tables, "alembic_version should not exist when migrations skipped"
+            assert "alembic_version" not in tables, (
+                "alembic_version should not exist when migrations skipped"
+            )
 
             # Verify voters table was still created
             assert "voters" in tables, "voters table should be created even without migrations"
@@ -93,12 +95,16 @@ class TestMigrationUpgradeDowngrade:
 
             # Verify revision is cleared
             current_rev_after_downgrade = show_current_revision()
-            assert current_rev_after_downgrade is None, "Revision should be None after downgrading to base"
+            assert current_rev_after_downgrade is None, (
+                "Revision should be None after downgrading to base"
+            )
 
             # Verify voters table was dropped by downgrade
             inspector = inspect(engine)
             tables_after_downgrade = inspector.get_table_names()
-            assert "voters" not in tables_after_downgrade, "voters table should be removed after downgrade"
+            assert "voters" not in tables_after_downgrade, (
+                "voters table should be removed after downgrade"
+            )
 
             # Test upgrade back to head
             upgrade_database("head")
@@ -111,7 +117,9 @@ class TestMigrationUpgradeDowngrade:
             # Verify voters table was recreated
             inspector = inspect(engine)
             tables_after_upgrade = inspector.get_table_names()
-            assert "voters" in tables_after_upgrade, "voters table should be recreated after upgrade"
+            assert "voters" in tables_after_upgrade, (
+                "voters table should be recreated after upgrade"
+            )
 
         finally:
             engine.dispose()
@@ -135,7 +143,9 @@ class TestDbStampExistingDatabase:
         try:
             # Verify alembic_version table does NOT exist yet
             tables = inspector.get_table_names()
-            assert "alembic_version" not in tables, "alembic_version should not exist before stamping"
+            assert "alembic_version" not in tables, (
+                "alembic_version should not exist before stamping"
+            )
 
             # Verify voters table exists (from init_database)
             assert "voters" in tables, "voters table should exist from init"
@@ -147,7 +157,9 @@ class TestDbStampExistingDatabase:
             # Verify alembic_version table now exists
             inspector = inspect(engine)
             tables_after_stamp = inspector.get_table_names()
-            assert "alembic_version" in tables_after_stamp, "alembic_version should exist after stamping"
+            assert "alembic_version" in tables_after_stamp, (
+                "alembic_version should exist after stamping"
+            )
 
             # Verify current revision is set
             current_rev = show_current_revision()
