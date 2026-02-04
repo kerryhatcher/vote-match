@@ -211,6 +211,62 @@ class Voter(Base):
 
         return " ".join(components)
 
+    @property
+    def best_geocode_result(self) -> Optional["GeocodeResult"]:
+        """Returns highest quality geocode result across all services.
+
+        Priority: exact > interpolated > approximate > no_match > failed
+        Within same quality, prefer higher confidence score.
+
+        Returns:
+            Best GeocodeResult or None if no results exist
+        """
+        if not self.geocode_results:
+            return None
+
+        quality_order = ["exact", "interpolated", "approximate", "no_match", "failed"]
+
+        def sort_key(result: "GeocodeResult") -> tuple[int, float]:
+            """Sort key: (quality_rank, -confidence)."""
+            try:
+                quality_rank = quality_order.index(result.status)
+            except ValueError:
+                quality_rank = len(quality_order)  # Unknown statuses go last
+
+            confidence = result.match_confidence if result.match_confidence else 0.0
+            return (quality_rank, -confidence)
+
+        sorted_results = sorted(self.geocode_results, key=sort_key)
+        return sorted_results[0]
+
+    @property
+    def needs_geocoding(self) -> bool:
+        """Check if voter needs geocoding.
+
+        Returns True if:
+        - No geocoding results exist at all
+        - Best result is no_match or failed
+
+        Returns:
+            True if geocoding is needed
+        """
+        best = self.best_geocode_result
+        return best is None or best.status in ["no_match", "failed"]
+
+    @property
+    def has_successful_geocode(self) -> bool:
+        """Check if voter has at least one successful geocode.
+
+        Returns:
+            True if best result is exact, interpolated, or approximate
+        """
+        best = self.best_geocode_result
+        return best is not None and best.status in [
+            "exact",
+            "interpolated",
+            "approximate",
+        ]
+
     def __repr__(self) -> str:
         """String representation of Voter model."""
         return (

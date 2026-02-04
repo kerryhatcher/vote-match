@@ -1,12 +1,16 @@
 """Processing functions for geocoding voter records."""
 
+from typing import Optional
+
 from geoalchemy2 import WKTElement
 from loguru import logger
-from sqlalchemy import or_
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from vote_match.config import Settings
 from vote_match.geocoder import GeocodeResult, build_batch_csv, parse_response, submit_batch
+from vote_match.geocoding.base import GeocodeService, StandardGeocodeResult
+from vote_match.models import GeocodeResult as GeocodeResultModel
 from vote_match.models import Voter
 from vote_match.usps_validator import USPSValidationResult, validate_batch
 
