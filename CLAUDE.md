@@ -14,11 +14,13 @@ Vote Match is a Python tool for processing voter registration records for GIS ap
 ## Development Commands
 
 ### Running the Application
+
 ```bash
 uv run main.py
 ```
 
 ### Package Management
+
 ```bash
 # Add a dependency
 uv add <package-name>
