@@ -1,7 +1,7 @@
 """Pytest configuration and fixtures for Vote Match tests."""
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from vote_match.config import Settings
@@ -37,6 +37,12 @@ def db_engine(test_settings: Settings):
         SQLAlchemy engine instance.
     """
     engine = create_engine(test_settings.database_url)
+
+    # Clean up alembic_version table if it exists (for clean test state)
+    with engine.connect() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS alembic_version;"))
+        conn.commit()
+
     yield engine
     engine.dispose()
 

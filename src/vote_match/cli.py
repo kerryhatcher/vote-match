@@ -127,6 +127,279 @@ def init_db(
 
 
 @app.command()
+def db_migrate(
+    message: str = typer.Option(
+        ...,
+        "--message",
+        "-m",
+        prompt="Migration message",
+        help="Description of the migration",
+    ),
+) -> None:
+    """Create a new database migration from model changes."""
+    logger.info("db-migrate command called with message: {}", message)
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=False,
+        ) as progress:
+            task = progress.add_task("Creating migration...", total=None)
+            create_migration(message, autogenerate=True)
+            progress.update(task, completed=True)
+
+        typer.secho(
+            "✓ Migration created successfully",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+        typer.secho(
+            "  Please review the migration file in alembic/versions/",
+            fg=typer.colors.YELLOW,
+        )
+        typer.secho(
+            "  Then run 'vote-match db-upgrade' to apply the migration",
+            fg=typer.colors.CYAN,
+        )
+
+    except Exception as e:
+        logger.error("Failed to create migration: {}", str(e))
+        typer.secho(
+            f"✗ Migration creation failed: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def db_upgrade(
+    revision: str = typer.Argument("head", help="Target revision (default: head)"),
+) -> None:
+    """Apply database migrations."""
+    logger.info("db-upgrade command called with revision: {}", revision)
+
+    try:
+        # Show current revision before upgrade
+        current = show_current_revision()
+        if current:
+            typer.echo(f"Current revision: {current}")
+        else:
+            typer.echo("Current revision: None (no migrations applied)")
+
+        # Apply migrations
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=False,
+        ) as progress:
+            task = progress.add_task("Applying migrations...", total=None)
+            upgrade_database(revision)
+            progress.update(task, completed=True)
+
+        # Show new revision
+        new_current = show_current_revision()
+        typer.secho(
+            f"✓ Database upgraded successfully to: {new_current}",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+
+    except Exception as e:
+        logger.error("Failed to upgrade database: {}", str(e))
+        typer.secho(
+            f"✗ Database upgrade failed: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def db_downgrade(
+    revision: str = typer.Argument(..., help="Target revision to downgrade to"),
+) -> None:
+    """Rollback database migrations."""
+    logger.info("db-downgrade command called with revision: {}", revision)
+
+    try:
+        # Show current revision
+        current = show_current_revision()
+        if current:
+            typer.echo(f"Current revision: {current}")
+        else:
+            typer.echo("Current revision: None (no migrations applied)")
+
+        # Warning and confirmation
+        typer.secho(
+            "WARNING: This will rollback your database schema!",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        confirm = typer.confirm("Are you sure you want to continue?")
+        if not confirm:
+            typer.secho("Operation cancelled", fg=typer.colors.YELLOW)
+            raise typer.Abort()
+
+        # Perform downgrade
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            transient=False,
+        ) as progress:
+            task = progress.add_task("Rolling back migrations...", total=None)
+            downgrade_database(revision)
+            progress.update(task, completed=True)
+
+        # Show new revision
+        new_current = show_current_revision()
+        if new_current:
+            typer.secho(
+                f"✓ Database downgraded successfully to: {new_current}",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+        else:
+            typer.secho(
+                "✓ Database downgraded successfully (no migrations applied)",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+
+    except Exception as e:
+        logger.error("Failed to downgrade database: {}", str(e))
+        typer.secho(
+            f"✗ Database downgrade failed: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def db_current() -> None:
+    """Show current database migration revision."""
+    logger.info("db-current command called")
+
+    try:
+        current = show_current_revision()
+
+        if current is None:
+            typer.secho(
+                "No migrations applied to database",
+                fg=typer.colors.YELLOW,
+            )
+            typer.secho(
+                "Run 'vote-match db-upgrade' to apply migrations",
+                fg=typer.colors.CYAN,
+            )
+        else:
+            typer.secho(
+                f"Current revision: {current}",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+
+    except Exception as e:
+        logger.error("Failed to get current revision: {}", str(e))
+        typer.secho(
+            f"✗ Failed to get current revision: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def db_history() -> None:
+    """Show database migration history."""
+    logger.info("db-history command called")
+
+    try:
+        from rich.table import Table
+        from rich.console import Console
+
+        console = Console()
+
+        # Get migration history
+        history = show_history()
+
+        # Create table
+        table = Table(
+            title="Migration History",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        table.add_column("Revision", style="cyan")
+        table.add_column("Description", style="white")
+        table.add_column("Status", style="green")
+
+        # Add rows (newest first)
+        for revision, description, is_current in reversed(history):
+            status = "✓ current" if is_current else ""
+            table.add_row(revision[:12], description, status)
+
+        console.print(table)
+
+    except Exception as e:
+        logger.error("Failed to get migration history: {}", str(e))
+        typer.secho(
+            f"✗ Failed to get migration history: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def db_stamp(
+    revision: str = typer.Argument("head", help="Revision to stamp (default: head)"),
+) -> None:
+    """Stamp the database with a specific migration revision without running migrations."""
+    logger.info("db-stamp command called with revision: {}", revision)
+
+    try:
+        # Warning and confirmation
+        typer.secho(
+            "WARNING: This will mark migrations as applied without running them!",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        typer.secho(
+            "Only use this for existing databases that already have the schema.",
+            fg=typer.colors.YELLOW,
+        )
+        confirm = typer.confirm("Are you sure you want to continue?")
+        if not confirm:
+            typer.secho("Operation cancelled", fg=typer.colors.YELLOW)
+            raise typer.Abort()
+
+        # Stamp the database
+        logger.info("Stamping database with revision: {}", revision)
+        alembic_command.stamp(get_alembic_config(), revision)
+
+        typer.secho(
+            f"✓ Database stamped successfully with revision: {revision}",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+        typer.secho(
+            "Run 'vote-match db-current' to verify",
+            fg=typer.colors.CYAN,
+        )
+
+    except Exception as e:
+        logger.error("Failed to stamp database: {}", str(e))
+        typer.secho(
+            f"✗ Database stamp failed: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def load_csv(
     csv_file: Path = typer.Argument(..., help="Path to voter registration CSV file"),
     truncate: bool = typer.Option(

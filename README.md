@@ -26,6 +26,101 @@ Address validating via USPS API. See [USPS API spec](docs/USPS_API_addresses-v3r
 - typer
 
 
+## Database Migrations
+
+Vote Match uses Alembic for database schema migrations. This allows you to track and manage database schema changes over time.
+
+### Fresh Database Setup
+
+For a new database, simply run:
+
+```bash
+vote-match init-db
+```
+
+This will:
+
+1. Create the PostGIS extension
+2. Create all database tables
+3. Apply all migrations and set up migration tracking
+
+If you need to start fresh with an existing database:
+
+```bash
+vote-match init-db --drop
+```
+
+**Warning**: This will delete all existing data and migration history.
+
+### Making Schema Changes
+
+When you need to modify the database schema:
+
+1. **Modify the models** in `src/vote_match/models.py`
+
+2. **Generate a migration** with a descriptive message:
+
+   ```bash
+   vote-match db-migrate -m "Add user preferences table"
+   ```
+
+3. **Review the generated migration** in `alembic/versions/`
+   - Alembic auto-generates the migration based on model changes
+   - Always review before applying to ensure correctness
+
+4. **Apply the migration** to update your database:
+
+   ```bash
+   vote-match db-upgrade
+   ```
+
+5. **Test the changes** to ensure everything works as expected
+
+### Migration Commands
+
+| Command                              | Description                                                                  |
+| ------------------------------------ | ---------------------------------------------------------------------------- |
+| `vote-match db-migrate -m "message"` | Create a new migration file based on model changes                           |
+| `vote-match db-upgrade [revision]`   | Apply migrations (default: latest)                                            |
+| `vote-match db-downgrade <revision>` | Rollback to a specific migration revision                                     |
+| `vote-match db-current`              | Show the current migration revision                                           |
+| `vote-match db-history`              | List all available migrations                                                 |
+| `vote-match db-stamp <revision>`     | Mark database as being at a specific revision without running migrations      |
+
+### Migrating an Existing Database
+
+If you have an existing database that was created without migrations, you have two options:
+
+#### Option A: Fresh Start (Recommended for Development)
+
+```bash
+# Back up your data first!
+vote-match export data-backup.csv
+
+# Drop and recreate with migrations
+vote-match init-db --drop
+
+# Reload your data
+vote-match load-csv data-backup.csv
+```
+
+#### Option B: Stamp Existing Database
+
+If you can't recreate the database (e.g., production), stamp it to mark it as current:
+
+```bash
+# Stamp the database at the current schema version
+vote-match db-stamp head
+```
+
+This tells Alembic that your database is already at the latest migration without actually running the migrations.
+
+**Important Notes:**
+- The PostGIS extension is NOT managed by migrations (requires superuser privileges)
+- Migration files are stored in `alembic/versions/`
+- Always review auto-generated migrations before applying them
+- Test migrations in development before applying to production
+
 ## Developer Conventions
 - Follow PEP 8 style guidelines.
 - Write clear and concise docstrings for all functions and classes.
@@ -39,4 +134,4 @@ Address validating via USPS API. See [USPS API spec](docs/USPS_API_addresses-v3r
 - use twelve-factor methodology for configuration management.
 - use Ruff for linting and code quality checks.
 - use pytest for testing.
-- 
+-

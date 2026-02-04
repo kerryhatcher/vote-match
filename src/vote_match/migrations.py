@@ -8,7 +8,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.runtime.migration import MigrationContext
 from loguru import logger
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 
 from vote_match.config import get_settings
 
@@ -133,25 +133,50 @@ def show_current_revision() -> Optional[str]:
         engine.dispose()
 
 
-def show_history() -> list[tuple[str, str]]:
+def show_history() -> list[tuple[str, str, bool]]:
     """
     Get list of all migrations with their descriptions.
 
     Returns:
-        List of (revision, description) tuples
+        List of (revision, description, is_current) tuples
     """
     logger.debug("Retrieving migration history")
     config = get_alembic_config()
 
     try:
         script = ScriptDirectory.from_config(config)
+        current_rev = show_current_revision()
         revisions = []
 
         for revision in script.walk_revisions():
-            revisions.append((revision.revision, revision.doc or "(no description)"))
+            is_current = revision.revision == current_rev
+            revisions.append((revision.revision, revision.doc or "(no description)", is_current))
 
         logger.debug("Found {} migrations", len(revisions))
         return revisions
     except Exception as e:
         logger.error("Failed to get migration history: {}", str(e))
+        raise
+
+
+def stamp_database(revision: str = "head") -> None:
+    """
+    Mark database as being at a specific revision without running migrations.
+
+    USE WITH CAUTION: This does not apply migrations, only updates the version table.
+
+    Args:
+        revision: Target revision to stamp (default: "head")
+
+    Raises:
+        Exception: If stamp operation fails
+    """
+    logger.warning("Stamping database at revision: {}", revision)
+    config = get_alembic_config()
+
+    try:
+        alembic_command.stamp(config, revision)
+        logger.info("Database stamped successfully at: {}", revision)
+    except Exception as e:
+        logger.error("Failed to stamp database: {}", str(e))
         raise
