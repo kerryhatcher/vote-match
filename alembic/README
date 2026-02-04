@@ -1,1 +1,119 @@
-Generic single-database configuration.
+# Alembic Database Migrations
+
+This directory contains database migrations for the Vote Match application using Alembic.
+
+## What are Database Migrations?
+
+Database migrations are version-controlled, incremental changes to your database schema. Instead of manually modifying the database or recreating it from scratch when the schema changes, migrations allow you to:
+
+- Track schema changes over time
+- Apply schema changes consistently across environments (dev, test, production)
+- Roll back changes if needed
+- Collaborate with other developers without conflicts
+
+## Available Migration Commands
+
+Vote Match provides these CLI commands for managing database migrations:
+
+### `vote-match db-migrate`
+Create a new migration based on changes to your models.
+- Use `--message` or `-m` to provide a descriptive message
+- Alembic will auto-detect changes by comparing models to the current database
+- Always review the generated migration file in `alembic/versions/` before applying
+
+### `vote-match db-upgrade`
+Apply pending migrations to bring the database up to date.
+- By default, upgrades to the latest version ("head")
+- Can specify a specific revision to upgrade to
+
+### `vote-match db-downgrade`
+Roll back migrations to a previous version.
+- Requires specifying the target revision
+- Shows a warning prompt for confirmation
+
+### `vote-match db-current`
+Display the current migration revision of the database.
+- Shows "No migrations applied" if database hasn't been migrated yet
+
+### `vote-match db-history`
+Show all migrations in reverse chronological order.
+- Marks the current revision
+
+### `vote-match db-stamp`
+Mark the database as being at a specific revision without running migrations.
+- USE WITH CAUTION: Only for special cases like importing an existing database
+- Shows a warning prompt for confirmation
+
+## Creating and Applying Migrations
+
+### Making Schema Changes
+
+1. Modify the models in `src/vote_match/models.py`
+2. Create a migration:
+   ```bash
+   uv run vote-match db-migrate -m "Add new column to voters table"
+   ```
+3. Review the generated migration file in `alembic/versions/`
+4. Apply the migration:
+   ```bash
+   uv run vote-match db-upgrade
+   ```
+5. Test that the changes work correctly
+
+### Testing Rollback
+
+It's good practice to test that your migration can be rolled back:
+
+```bash
+# Check current revision
+uv run vote-match db-current
+
+# Downgrade to previous revision
+uv run vote-match db-downgrade -1
+
+# Re-upgrade to latest
+uv run vote-match db-upgrade
+```
+
+## Fresh Database vs Existing Database
+
+### Fresh Database Setup
+
+For a completely new database, use the standard init-db command:
+
+```bash
+uv run vote-match init-db
+```
+
+This will:
+1. Create the PostGIS extension
+2. Run all migrations to create tables
+3. Leave you with a fully initialized database
+
+### Existing Database (Already Has Tables)
+
+If you have an existing Vote Match database with tables but no migration history:
+
+**Option A: Fresh Start (Recommended)**
+```bash
+uv run vote-match init-db --drop
+```
+
+**Option B: Stamp Existing Database**
+```bash
+# Mark database as being at "head" revision
+uv run vote-match db-stamp head
+```
+
+Use Option B only if you're certain the database schema matches the current models.
+
+## Important Notes
+
+- **PostGIS Extension**: The PostGIS extension is NOT managed by Alembic. It's created by the `init-db` command and should exist before running migrations.
+- **Review Migrations**: Always review auto-generated migration files before applying them. Alembic is good at detecting changes, but may need manual adjustments for complex scenarios.
+- **Backup First**: Before running migrations on production databases, always create a backup.
+- **Migration Files**: Migration files in `alembic/versions/` should be committed to version control.
+
+## For More Information
+
+See the main project documentation in the README.md file for complete database setup and migration workflows.
