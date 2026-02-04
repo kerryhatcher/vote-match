@@ -319,7 +319,4 @@ class CountyCommissionDistrict(Base):
 
     def __repr__(self) -> str:
         """String representation of CountyCommissionDistrict model."""
-        return (
-            f"<CountyCommissionDistrict(district_id='{self.district_id}', "
-            f"name='{self.name}')>"
-        )
+        return f"<CountyCommissionDistrict(district_id='{self.district_id}', name='{self.name}')>"

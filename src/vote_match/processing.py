@@ -1,15 +1,19 @@
 """Processing functions for geocoding voter records."""
 
+import json
+from pathlib import Path
 from typing import Optional
 
 from geoalchemy2 import WKTElement
 from loguru import logger
+from shapely.geometry import shape
 from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from vote_match.config import Settings
 from vote_match.geocoder import GeocodeResult, build_batch_csv, parse_response, submit_batch
 from vote_match.geocoding.base import GeocodeService, StandardGeocodeResult
+from vote_match.models import CountyCommissionDistrict
 from vote_match.models import GeocodeResult as GeocodeResultModel
 from vote_match.models import Voter
 from vote_match.usps_validator import USPSValidationResult, validate_batch
@@ -835,3 +839,280 @@ def sync_best_geocode_to_voters(
     )
 
     return stats
+
+
+def import_geojson_districts(
+    session: Session,
+    file_path: Path,
+    clear_existing: bool = False,
+) -> dict[str, int]:
+    """Import district boundaries from GeoJSON file.
+
+    Args:
+        session: Database session
+        file_path: Path to GeoJSON file
+        clear_existing: If True, delete all existing districts before importing
+
+    Returns:
+        Dictionary with statistics: total, success, failed, skipped
+
+    Raises:
+        FileNotFoundError: If GeoJSON file doesn't exist
+        ValueError: If GeoJSON is invalid or missing required fields
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(f"GeoJSON file not found: {file_path}")
+
+    logger.info(f"Importing districts from {file_path}")
+
+    # Clear existing districts if requested
+    if clear_existing:
+        count = session.query(CountyCommissionDistrict).count()
+        logger.info(f"Clearing {count} existing districts...")
+        session.query(CountyCommissionDistrict).delete()
+        session.commit()
+
+    # Load GeoJSON
+    with open(file_path) as f:
+        geojson_data = json.load(f)
+
+    if geojson_data.get("type") != "FeatureCollection":
+        raise ValueError(
+            f"Invalid GeoJSON: expected FeatureCollection, got {geojson_data.get('type')}"
+        )
+
+    features = geojson_data.get("features", [])
+    if not features:
+        raise ValueError("No features found in GeoJSON")
+
+    logger.info(f"Found {len(features)} features to import")
+
+    stats = {"total": len(features), "success": 0, "failed": 0, "skipped": 0}
+
+    for idx, feature in enumerate(features, 1):
+        try:
+            properties = feature.get("properties", {})
+            geometry = feature.get("geometry")
+
+            if not geometry:
+                logger.warning(f"Feature {idx}: Missing geometry, skipping")
+                stats["skipped"] += 1
+                continue
+
+            # Extract required fields
+            district_id = properties.get("District")
+            name = properties.get("Name")
+
+            if not district_id or not name:
+                logger.warning(f"Feature {idx}: Missing District or Name, skipping")
+                stats["skipped"] += 1
+                continue
+
+            # Check if district already exists
+            existing = (
+                session.query(CountyCommissionDistrict).filter_by(district_id=district_id).first()
+            )
+
+            if existing:
+                logger.debug(f"District {district_id} already exists, skipping")
+                stats["skipped"] += 1
+                continue
+
+            # Convert GeoJSON geometry to PostGIS
+            shapely_geom = shape(geometry)
+            wkt = shapely_geom.wkt
+            geom = WKTElement(wkt, srid=4326)
+
+            # Create district record
+            district = CountyCommissionDistrict(
+                district_id=district_id,
+                name=name,
+                rep_name=properties.get("Commissioner"),
+                party=properties.get("Party"),
+                district_url=properties.get("District_URL"),
+                email=properties.get("E_Mail"),
+                photo_url=properties.get("Photo_URL"),
+                rep_name_2=properties.get("Commissioner2"),
+                object_id=properties.get("OBJECTID"),
+                global_id=properties.get("GlobalID"),
+                creation_date=None,  # Would need to parse date string if present
+                creator=properties.get("Creator"),
+                edit_date=None,  # Would need to parse date string if present
+                editor=properties.get("Editor"),
+                geom=geom,
+            )
+
+            session.add(district)
+            stats["success"] += 1
+
+            if stats["success"] % 100 == 0:
+                logger.info(f"Progress: {stats['success']}/{len(features)} districts imported...")
+
+        except Exception as e:
+            logger.warning(f"Feature {idx}: Failed to import - {e}")
+            stats["failed"] += 1
+
+    # Commit all changes
+    session.commit()
+
+    logger.info(
+        f"Import complete: {stats['success']} imported, "
+        f"{stats['skipped']} skipped, "
+        f"{stats['failed']} failed"
+    )
+
+    return stats
+
+
+def compare_voter_districts(
+    session: Session,
+    limit: int | None = None,
+) -> dict[str, int | list[dict]]:
+    """Compare voter registration districts with spatially-determined districts.
+
+    Uses PostGIS spatial joins to find which district polygon contains each
+    voter's geocoded point location, then compares with their registered
+    district.
+
+    Args:
+        session: Database session
+        limit: Optional limit on number of voters to process
+
+    Returns:
+        Dictionary with:
+        - statistics: total, matched, mismatched, no_location, no_district
+        - mismatches: List of mismatch records (voter_id, registered, spatial)
+    """
+    from sqlalchemy import text
+
+    logger.info("Starting voter district comparison")
+
+    # Count total voters with geocoded locations
+    total_with_geom = session.query(Voter).filter(Voter.geom.isnot(None)).count()
+    logger.info(f"Found {total_with_geom} voters with geocoded locations")
+
+    # Build query to find spatial district for each voter
+    # Using ST_Within to find which district polygon contains the voter's point
+    query = text(
+        """
+        SELECT
+            v.voter_registration_number,
+            v.county_precinct as registered_district,
+            d.district_id as spatial_district,
+            d.name as spatial_district_name,
+            ST_AsText(v.geom) as voter_location
+        FROM voters v
+        LEFT JOIN county_commission_districts d
+            ON ST_Within(v.geom, d.geom)
+        WHERE v.geom IS NOT NULL
+        """
+    )
+
+    if limit:
+        query = text(str(query) + f" LIMIT {limit}")
+
+    logger.info("Executing spatial join query...")
+    results = session.execute(query).fetchall()
+
+    stats = {
+        "total": len(results),
+        "matched": 0,
+        "mismatched": 0,
+        "no_location": 0,
+        "no_district": 0,
+    }
+
+    mismatches = []
+
+    for row in results:
+        voter_id = row[0]
+        registered_district = row[1]
+        spatial_district = row[2]
+        spatial_district_name = row[3]
+        voter_location = row[4]
+
+        # Skip if we couldn't determine spatial district
+        if not spatial_district:
+            stats["no_district"] += 1
+            continue
+
+        # Skip if voter doesn't have a registered district
+        if not registered_district:
+            stats["no_district"] += 1
+            continue
+
+        # Compare districts (normalize to handle different formats)
+        # Voter's county_precinct might be like "District 1" or "1"
+        # District ID might be like "1" or "01"
+        registered_normalized = (
+            registered_district.replace("District", "").replace("district", "").strip()
+        )
+        spatial_normalized = spatial_district.strip()
+
+        if registered_normalized == spatial_normalized:
+            stats["matched"] += 1
+        else:
+            stats["mismatched"] += 1
+            mismatches.append(
+                {
+                    "voter_id": voter_id,
+                    "registered_district": registered_district,
+                    "spatial_district": spatial_district,
+                    "spatial_district_name": spatial_district_name,
+                    "location": voter_location,
+                }
+            )
+
+        if (stats["matched"] + stats["mismatched"]) % 1000 == 0:
+            logger.info(
+                f"Progress: {stats['matched'] + stats['mismatched']}/{stats['total']} voters processed..."
+            )
+
+    logger.info(
+        f"Comparison complete: {stats['matched']} matched, "
+        f"{stats['mismatched']} mismatched, "
+        f"{stats['no_district']} no district found"
+    )
+
+    return {
+        "stats": stats,
+        "mismatches": mismatches,
+    }
+
+
+def export_district_comparison(
+    mismatches: list[dict],
+    output_path: Path,
+) -> None:
+    """Export district comparison mismatches to CSV file.
+
+    Args:
+        mismatches: List of mismatch records from compare_voter_districts()
+        output_path: Path to output CSV file
+    """
+    import csv
+
+    logger.info(f"Exporting {len(mismatches)} mismatches to {output_path}")
+
+    with open(output_path, "w", newline="") as f:
+        if not mismatches:
+            # Write empty file with headers
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "voter_id",
+                    "registered_district",
+                    "spatial_district",
+                    "spatial_district_name",
+                    "location",
+                ],
+            )
+            writer.writeheader()
+            logger.info("No mismatches to export, wrote empty file with headers")
+            return
+
+        writer = csv.DictWriter(f, fieldnames=mismatches[0].keys())
+        writer.writeheader()
+        writer.writerows(mismatches)
+
+    logger.info(f"Export complete: {len(mismatches)} records written to {output_path}")

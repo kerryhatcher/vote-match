@@ -4,7 +4,9 @@ from pathlib import Path
 
 import typer
 from loguru import logger
+from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
+from rich.table import Table
 from sqlalchemy import delete, select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from alembic import command as alembic_command
@@ -13,7 +15,7 @@ from vote_match.config import get_settings
 from vote_match.database import init_database, get_engine, get_session
 from vote_match.logging import setup_logging
 from vote_match.csv_reader import read_voter_csv, dataframe_to_dicts
-from vote_match.models import Voter, GeocodeResult
+from vote_match.models import CountyCommissionDistrict, GeocodeResult, Voter
 from vote_match.migrations import (
     create_migration,
     upgrade_database,
@@ -22,6 +24,8 @@ from vote_match.migrations import (
     show_history,
     get_alembic_config,
 )
+
+console = Console()
 
 app = typer.Typer(
     name="vote-match",
@@ -1642,6 +1646,250 @@ def _export_geojson(voters: list[Voter], output: Path) -> None:
         json.dump(geojson, f, indent=2)
 
     logger.info("GeoJSON export complete: {} features written to {}", len(features), output)
+
+
+@app.command()
+def import_geojson(
+    geojson_file: Path = typer.Argument(
+        ...,
+        help="Path to GeoJSON file containing district boundaries",
+    ),
+    clear: bool = typer.Option(
+        False,
+        "--clear",
+        help="Clear all existing districts before importing",
+    ),
+) -> None:
+    """Import county commission district boundaries from GeoJSON file.
+
+    The GeoJSON file should contain a FeatureCollection with district polygons
+    and their associated metadata (district ID, name, representative info, etc.).
+    """
+    logger.info("import-geojson command called with file: {}", geojson_file)
+
+    settings = get_settings()
+
+    try:
+        # Check file exists
+        if not geojson_file.exists():
+            typer.secho(
+                f"✗ GeoJSON file not found: {geojson_file}",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            raise typer.Exit(code=1)
+
+        # Get database connection
+        engine = get_engine(settings)
+        session = get_session(engine)
+
+        try:
+            # Confirm clear operation if requested
+            if clear:
+                count = session.query(CountyCommissionDistrict).count()
+                typer.secho(
+                    f"WARNING: About to delete {count} existing district records!",
+                    fg=typer.colors.RED,
+                    bold=True,
+                )
+                confirm = typer.confirm("Are you sure you want to continue?")
+                if not confirm:
+                    typer.secho("Operation cancelled", fg=typer.colors.YELLOW)
+                    raise typer.Abort()
+
+            # Import districts with progress indicator
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Importing districts...", total=None)
+
+                from vote_match.processing import import_geojson_districts
+
+                result = import_geojson_districts(
+                    session=session,
+                    file_path=geojson_file,
+                    clear_existing=clear,
+                )
+
+                progress.update(task, completed=True)
+
+            # Display results
+            table = Table(title="Import Results", header_style="bold magenta")
+            table.add_column("Metric", style="cyan")
+            table.add_column("Count", style="green", justify="right")
+
+            table.add_row("Total Features", str(result["total"]))
+            table.add_row("Successfully Imported", str(result["success"]))
+            table.add_row("Skipped", str(result["skipped"]))
+            table.add_row("Failed", str(result["failed"]))
+
+            console.print()
+            console.print(table)
+            console.print()
+
+            # Success message
+            typer.secho(
+                f"✓ Import complete: {result['success']} districts imported",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+
+            logger.info("import-geojson completed successfully")
+
+        finally:
+            session.close()
+            engine.dispose()
+
+    except FileNotFoundError as e:
+        typer.secho(f"✗ File error: {e}", fg=typer.colors.RED, bold=True)
+        logger.error("File not found: {}", e)
+        raise typer.Exit(code=1)
+    except ValueError as e:
+        typer.secho(f"✗ Invalid GeoJSON: {e}", fg=typer.colors.RED, bold=True)
+        logger.error("Invalid GeoJSON: {}", e)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"✗ Import failed: {e}", fg=typer.colors.RED, bold=True)
+        logger.exception("import-geojson failed with error: {}", e)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def compare_districts(
+    export: Path | None = typer.Option(
+        None,
+        "--export",
+        help="Export mismatches to CSV file",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        help="Limit number of voters to process (for testing)",
+    ),
+) -> None:
+    """Compare voter registration districts with spatial district boundaries.
+
+    Uses PostGIS spatial joins to determine which district polygon contains
+    each voter's geocoded point location, then compares with their registered
+    county precinct district.
+
+    Note: Voters must have geocoded locations (run 'geocode' and 'sync-geocode'
+    first) and districts must be imported (run 'import-geojson' first).
+    """
+    logger.info("compare-districts command called")
+
+    settings = get_settings()
+
+    try:
+        # Get database connection
+        engine = get_engine(settings)
+        session = get_session(engine)
+
+        try:
+            # Check if districts have been imported
+            district_count = session.query(CountyCommissionDistrict).count()
+            if district_count == 0:
+                typer.secho(
+                    "✗ No districts found. Please run 'import-geojson' first.",
+                    fg=typer.colors.RED,
+                    bold=True,
+                )
+                raise typer.Exit(code=1)
+
+            typer.echo(f"Found {district_count} districts in database")
+
+            # Check if voters have geocoded locations
+            voters_with_geom = session.query(Voter).filter(Voter.geom.isnot(None)).count()
+            if voters_with_geom == 0:
+                typer.secho(
+                    "✗ No voters with geocoded locations. Please run 'geocode' and 'sync-geocode' first.",
+                    fg=typer.colors.RED,
+                    bold=True,
+                )
+                raise typer.Exit(code=1)
+
+            typer.echo(f"Found {voters_with_geom} voters with geocoded locations")
+
+            # Run comparison with progress indicator
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Comparing districts...", total=None)
+
+                from vote_match.processing import (
+                    compare_voter_districts,
+                    export_district_comparison,
+                )
+
+                result = compare_voter_districts(session=session, limit=limit)
+
+                progress.update(task, completed=True)
+
+            stats = result["stats"]
+            mismatches = result["mismatches"]
+
+            # Display statistics
+            table = Table(title="District Comparison Results", header_style="bold magenta")
+            table.add_column("Metric", style="cyan")
+            table.add_column("Count", style="green", justify="right")
+            table.add_column("Percentage", style="yellow", justify="right")
+
+            total = stats["total"]
+            matched = stats["matched"]
+            mismatched = stats["mismatched"]
+            no_district = stats["no_district"]
+
+            # Calculate percentages
+            matched_pct = (matched / total * 100) if total > 0 else 0
+            mismatched_pct = (mismatched / total * 100) if total > 0 else 0
+            no_district_pct = (no_district / total * 100) if total > 0 else 0
+
+            table.add_row("Total Voters Processed", str(total), "100.0%")
+            table.add_row("Matched Districts", str(matched), f"{matched_pct:.1f}%")
+            table.add_row("Mismatched Districts", str(mismatched), f"{mismatched_pct:.1f}%")
+            table.add_row("No District Found", str(no_district), f"{no_district_pct:.1f}%")
+
+            console.print()
+            console.print(table)
+            console.print()
+
+            # Export mismatches if requested
+            if export:
+                export_district_comparison(mismatches, export)
+                typer.secho(
+                    f"✓ Exported {len(mismatches)} mismatches to {export}",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+
+            # Summary message
+            if mismatched > 0:
+                typer.secho(
+                    f"⚠ Found {mismatched} voters in different districts than registered",
+                    fg=typer.colors.YELLOW,
+                    bold=True,
+                )
+            else:
+                typer.secho(
+                    "✓ All voters are in their registered districts",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+
+            logger.info("compare-districts completed successfully")
+
+        finally:
+            session.close()
+            engine.dispose()
+
+    except Exception as e:
+        typer.secho(f"✗ Comparison failed: {e}", fg=typer.colors.RED, bold=True)
+        logger.exception("compare-districts failed with error: {}", e)
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

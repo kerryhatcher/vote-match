@@ -261,22 +261,41 @@ class PhotonGeocoder(GeocodeService):
                 matched_address = ", ".join(address_parts) if address_parts else None
 
                 # Infer quality from OSM key (Photon doesn't provide confidence scores)
+                # OSM keys categorized by precision level:
+                # - addr: Specific address point
+                # - highway: Street-level match
+                # - building: Building footprint (specific but not address-level)
+                # - amenity/shop: Point of interest (restaurant, store, etc.)
+                # - place: City/neighborhood level
+                # - landuse: Land use area (park, forest, etc.)
                 osm_key = properties.get("osm_key", "").lower()
 
                 if osm_key == "addr":
-                    # Address-level match
+                    # Address-level match (highest precision)
                     status = GeocodeQuality.EXACT
                     match_confidence = 0.9
                 elif osm_key == "highway":
                     # Street-level match
                     status = GeocodeQuality.INTERPOLATED
                     match_confidence = 0.7
-                elif osm_key == "place":
-                    # City/place-level match
+                elif osm_key == "building":
+                    # Building footprint - specific but not address-level
                     status = GeocodeQuality.APPROXIMATE
                     match_confidence = 0.5
+                elif osm_key in ("amenity", "shop"):
+                    # POI (restaurant, store, etc.) - lower than building
+                    status = GeocodeQuality.APPROXIMATE
+                    match_confidence = 0.45
+                elif osm_key == "place":
+                    # City/neighborhood level
+                    status = GeocodeQuality.APPROXIMATE
+                    match_confidence = 0.5
+                elif osm_key == "landuse":
+                    # Land use area (park, forest) - lowest precision
+                    status = GeocodeQuality.APPROXIMATE
+                    match_confidence = 0.4
                 else:
-                    # Unknown OSM key, use approximate
+                    # Unknown OSM key - rare edge cases
                     logger.warning(
                         f"Unknown OSM key '{osm_key}' for voter {voter_id}, "
                         f"defaulting to APPROXIMATE"
