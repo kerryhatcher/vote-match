@@ -89,7 +89,7 @@ class Settings(BaseSettings):
         description="Default state code for voter data",
     )
     default_batch_size: int = Field(
-        default=10000,
+        default=5000,
         description="Default batch size for processing records",
     )
 
