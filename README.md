@@ -34,3 +34,4 @@ The primary interface is a command-line interface (CLI).
 - Document all major changes in the CHANGELOG.md file.
 - Update the README.md file with any new features or changes.
 - Update CLAUDE.md with any important changes or notes for future reference.
+- use twelve-factor methodology for configuration management.
