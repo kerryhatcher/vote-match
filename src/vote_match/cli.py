@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 from loguru import logger
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
-from sqlalchemy import delete
+from sqlalchemy import delete, select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from alembic import command as alembic_command
 
@@ -13,7 +13,7 @@ from vote_match.config import get_settings
 from vote_match.database import init_database, get_engine, get_session
 from vote_match.logging import setup_logging
 from vote_match.csv_reader import read_voter_csv, dataframe_to_dicts
-from vote_match.models import Voter
+from vote_match.models import Voter, GeocodeResult
 from vote_match.migrations import (
     create_migration,
     upgrade_database,
@@ -1214,6 +1214,226 @@ def status() -> None:
         logger.error("Failed to get status: {}", str(e))
         typer.secho(
             f"✗ Failed to get status: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def delete_geocode_results(
+    service: str | None = typer.Option(
+        None,
+        "--service",
+        "-s",
+        help="Delete results from specific service (e.g., census, nominatim)",
+    ),
+    status: str | None = typer.Option(
+        None,
+        "--status",
+        help="Delete only results with specific status (e.g., failed, no_match)",
+    ),
+    all_results: bool = typer.Option(
+        False,
+        "--all",
+        help="Delete ALL geocoding results (requires confirmation)",
+    ),
+) -> None:
+    """Delete geocoding results from the database.
+
+    This is useful for retrying failed geocodes with the same service.
+
+    Examples:
+        vote-match delete-geocode-results --service census --status failed
+        vote-match delete-geocode-results --status failed  # All services
+        vote-match delete-geocode-results --service nominatim  # All statuses
+    """
+    logger.info(
+        f"delete-geocode-results command called with service={service}, "
+        f"status={status}, all_results={all_results}"
+    )
+
+    # Valid status values
+    VALID_STATUSES = {"exact", "interpolated", "approximate", "no_match", "failed"}
+
+    # Validate parameters - at least one must be provided
+    if not service and not status and not all_results:
+        typer.secho(
+            "✗ Error: Must specify at least one of --service, --status, or --all",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        typer.secho(
+            "\nExamples:",
+            fg=typer.colors.YELLOW,
+        )
+        typer.secho(
+            "  vote-match delete-geocode-results --service census --status failed",
+            fg=typer.colors.CYAN,
+        )
+        typer.secho(
+            "  vote-match delete-geocode-results --status failed",
+            fg=typer.colors.CYAN,
+        )
+        raise typer.Exit(code=1)
+
+    # Validate status value if provided
+    if status and status not in VALID_STATUSES:
+        typer.secho(
+            f"✗ Error: Invalid status '{status}'",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        typer.secho(
+            f"\nValid statuses: {', '.join(sorted(VALID_STATUSES))}",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+
+    try:
+        # Get database connection
+        engine = get_engine(settings)
+        session = get_session(engine)
+
+        try:
+            # Build conditions for the query
+            conditions = []
+            if service:
+                conditions.append(GeocodeResult.service_name == service)
+            if status:
+                conditions.append(GeocodeResult.status == status)
+
+            # Query for count BEFORE deletion
+            count_query = select(func.count()).select_from(GeocodeResult)
+            for condition in conditions:
+                count_query = count_query.filter(condition)
+
+            count = session.execute(count_query).scalar()
+
+            # Check if any records match
+            if count == 0:
+                typer.secho(
+                    "No matching records found to delete",
+                    fg=typer.colors.YELLOW,
+                )
+
+                # Show what was searched for
+                filters = []
+                if service:
+                    filters.append(f"service: {service}")
+                if status:
+                    filters.append(f"status: {status}")
+                if all_results:
+                    filters.append("all results")
+
+                typer.secho(
+                    f"Filters applied: {', '.join(filters)}",
+                    fg=typer.colors.YELLOW,
+                )
+                return
+
+            # Show what will be deleted and confirm
+            typer.echo(f"\nRecords to delete: {count:,}")
+
+            filters = []
+            if service:
+                filters.append(f"service: {service}")
+            if status:
+                filters.append(f"status: {status}")
+            if all_results:
+                filters.append("all results")
+
+            typer.echo(f"Filters: {', '.join(filters)}")
+            typer.echo("")
+
+            typer.secho(
+                "WARNING: This will permanently delete geocoding results!",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+
+            confirm = typer.confirm("Are you sure you want to continue?")
+            if not confirm:
+                typer.secho("Operation cancelled", fg=typer.colors.YELLOW)
+                raise typer.Abort()
+
+            # Execute deletion
+            delete_stmt = delete(GeocodeResult)
+            for condition in conditions:
+                delete_stmt = delete_stmt.where(condition)
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Deleting records...", total=None)
+                result = session.execute(delete_stmt)
+                session.commit()
+                progress.update(task, completed=True)
+
+            # Get the actual count of deleted rows
+            deleted_count = result.rowcount
+
+            # Display results
+            from rich.console import Console
+            from rich.table import Table
+
+            console = Console()
+
+            table = Table(
+                title="Deletion Summary",
+                show_header=True,
+                header_style="bold magenta",
+            )
+            table.add_column("Attribute", style="cyan")
+            table.add_column("Value", style="green")
+
+            table.add_row("Records Deleted", f"{deleted_count:,}")
+            if service:
+                table.add_row("Service", service)
+            if status:
+                table.add_row("Status", status)
+
+            console.print(table)
+
+            # Success message
+            typer.secho(
+                f"\n✓ Successfully deleted {deleted_count:,} geocoding results",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+
+            if status == "failed":
+                typer.secho(
+                    "\nYou can now retry geocoding with:",
+                    fg=typer.colors.CYAN,
+                )
+                if service:
+                    typer.secho(
+                        f"  vote-match geocode --service {service} --only-unmatched --retry-failed",
+                        fg=typer.colors.CYAN,
+                    )
+                else:
+                    typer.secho(
+                        "  vote-match geocode --service <name> --only-unmatched --retry-failed",
+                        fg=typer.colors.CYAN,
+                    )
+
+        finally:
+            session.close()
+            engine.dispose()
+
+    except typer.Abort:
+        # User cancelled the operation - this is expected, not an error
+        logger.info("Delete operation cancelled by user")
+        raise typer.Exit(code=0)
+    except Exception as e:
+        logger.error(f"Failed to delete geocode results: {e}")
+        typer.secho(
+            f"✗ Failed to delete geocode results: {e}",
             fg=typer.colors.RED,
             bold=True,
         )
