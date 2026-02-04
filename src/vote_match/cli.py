@@ -4,6 +4,7 @@ import typer
 from loguru import logger
 
 from vote_match.config import get_settings
+from vote_match.database import init_database
 from vote_match.logging import setup_logging
 
 app = typer.Typer(
@@ -41,10 +42,57 @@ def main(
 
 
 @app.command()
-def init_db() -> None:
+def init_db(
+    drop: bool = typer.Option(
+        False,
+        "--drop",
+        help="Drop existing tables before creating new ones",
+    ),
+) -> None:
     """Initialize the PostGIS database schema."""
-    logger.info("init-db command called")
-    typer.echo("Not implemented yet")
+    logger.info("init-db command called with drop={}", drop)
+
+    settings = get_settings()
+
+    try:
+        if drop:
+            typer.secho(
+                "WARNING: This will drop all existing tables!",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            confirm = typer.confirm("Are you sure you want to continue?")
+            if not confirm:
+                typer.secho("Operation cancelled", fg=typer.colors.YELLOW)
+                raise typer.Abort()
+
+        init_database(drop_tables=drop, settings=settings)
+
+        typer.secho(
+            "✓ Database initialized successfully",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+
+        if drop:
+            typer.secho(
+                "  All tables were dropped and recreated",
+                fg=typer.colors.YELLOW,
+            )
+        else:
+            typer.secho(
+                "  PostGIS extension and tables created",
+                fg=typer.colors.GREEN,
+            )
+
+    except Exception as e:
+        logger.error("Failed to initialize database: {}", str(e))
+        typer.secho(
+            f"✗ Database initialization failed: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command()
