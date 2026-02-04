@@ -1,8 +1,6 @@
 """Tests for database migration functionality."""
 
-import pytest
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.orm import Session
 
 from vote_match.config import Settings
 from vote_match.database import init_database

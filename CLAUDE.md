@@ -108,7 +108,7 @@ Vote Match uses Alembic for database schema migrations. When making changes to t
    uv run ruff format .
    ```
 
-### Important Notes
+### Migration Notes
 
 - **PostGIS extension is NOT managed by migrations** - it requires superuser privileges and is handled separately in `init_database()`
 - **Migration files are stored in** `alembic/versions/`
@@ -117,7 +117,7 @@ Vote Match uses Alembic for database schema migrations. When making changes to t
 - **Migration commands**: `db-migrate`, `db-upgrade`, `db-downgrade`, `db-current`, `db-history`, `db-stamp`
 - **Always lint code with ruff** before committing changes
 
-## Important Notes
+## Additional Notes
 
 - The `sample.csv` file is gitignored and contains voter registration data. Do not commit voter data files to version control.
 - PostGIS database integration will be required for the spatial operations (not yet implemented)
