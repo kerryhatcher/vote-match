@@ -7,12 +7,21 @@ from loguru import logger
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
 from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from alembic import command as alembic_command
 
 from vote_match.config import get_settings
 from vote_match.database import init_database, get_engine, get_session
 from vote_match.logging import setup_logging
 from vote_match.csv_reader import read_voter_csv, dataframe_to_dicts
 from vote_match.models import Voter
+from vote_match.migrations import (
+    create_migration,
+    upgrade_database,
+    downgrade_database,
+    show_current_revision,
+    show_history,
+    get_alembic_config,
+)
 
 app = typer.Typer(
     name="vote-match",
@@ -53,18 +62,23 @@ def init_db(
     drop: bool = typer.Option(
         False,
         "--drop",
-        help="Drop existing tables before creating new ones",
+        help="Drop existing tables and migration history before creating new ones",
+    ),
+    skip_migrations: bool = typer.Option(
+        False,
+        "--skip-migrations",
+        help="Skip running migrations (PostGIS extension only)",
     ),
 ) -> None:
     """Initialize the PostGIS database schema."""
-    logger.info("init-db command called with drop={}", drop)
+    logger.info("init-db command called with drop={}, skip_migrations={}", drop, skip_migrations)
 
     settings = get_settings()
 
     try:
         if drop:
             typer.secho(
-                "WARNING: This will drop all existing tables!",
+                "WARNING: This will drop all existing tables and migration history!",
                 fg=typer.colors.RED,
                 bold=True,
             )
@@ -73,7 +87,7 @@ def init_db(
                 typer.secho("Operation cancelled", fg=typer.colors.YELLOW)
                 raise typer.Abort()
 
-        init_database(drop_tables=drop, settings=settings)
+        init_database(drop_tables=drop, settings=settings, run_migrations=not skip_migrations)
 
         typer.secho(
             "✓ Database initialized successfully",
@@ -83,12 +97,22 @@ def init_db(
 
         if drop:
             typer.secho(
-                "  All tables were dropped and recreated",
+                "  All tables and migration history were dropped and recreated",
                 fg=typer.colors.YELLOW,
+            )
+
+        if skip_migrations:
+            typer.secho(
+                "  PostGIS extension and tables created (migrations skipped)",
+                fg=typer.colors.GREEN,
+            )
+            typer.secho(
+                "  Run 'vote-match db-upgrade' to apply migrations",
+                fg=typer.colors.CYAN,
             )
         else:
             typer.secho(
-                "  PostGIS extension and tables created",
+                "  PostGIS extension created and migrations applied",
                 fg=typer.colors.GREEN,
             )
 
