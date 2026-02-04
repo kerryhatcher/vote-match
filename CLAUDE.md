@@ -47,6 +47,7 @@ Always lint code before committing changes.
 ## Data Structure
 
 The project works with voter registration CSV files with the following key fields:
+
 - Voter identification: Registration Number, Status, Name fields
 - Address components: Street Number, Direction, Street Name, Type, Apt/Unit, City, Zipcode
 - Geographic divisions: County Precinct, Congressional District, State Senate/House Districts, Municipality
@@ -70,6 +71,7 @@ Vote Match uses Alembic for database schema migrations. When making changes to t
 1. **Modify models.py**: Make your changes to `src/vote_match/models.py`
 
 2. **Generate migration**: Create a new migration file with a descriptive message
+
    ```bash
    vote-match db-migrate -m "Add new column to voters table"
    ```
@@ -80,6 +82,7 @@ Vote Match uses Alembic for database schema migrations. When making changes to t
    - Edit if necessary (e.g., add data migrations, handle special cases)
 
 4. **Apply migration**: Upgrade the database to the latest schema
+
    ```bash
    vote-match db-upgrade
    ```
@@ -87,16 +90,19 @@ Vote Match uses Alembic for database schema migrations. When making changes to t
 5. **Test**: Verify the changes work correctly with your application
 
 6. **Test rollback**: Ensure the migration can be rolled back
+
    ```bash
    vote-match db-downgrade <previous-revision>
    ```
 
 7. **Re-apply**: Upgrade back to head
+
    ```bash
    vote-match db-upgrade
    ```
 
 8. **Lint code**: Always lint before committing
+
    ```bash
    uv run ruff check .
    uv run ruff format .
