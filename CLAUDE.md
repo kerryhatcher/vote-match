@@ -33,6 +33,7 @@ uv remove <package-name>
 ```
 
 ### Code Quality
+
 ```bash
 # Lint Python code with ruff
 uv run ruff check .
