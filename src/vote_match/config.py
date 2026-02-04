@@ -33,6 +33,29 @@ class NominatimConfig(ServiceConfig):
     batch_size: int = 10  # Small batches for frequent progress saves
 
 
+class MapboxConfig(ServiceConfig):
+    """Configuration for Mapbox Geocoding API."""
+
+    api_key: Optional[str] = None
+    base_url: str = "https://api.mapbox.com"
+    api_version: str = "v6"  # v6 has batch support
+    rate_limit_delay: float = 0.06  # 1000/min = ~0.06s
+    timeout: int = 60
+    batch_size: int = 100  # Conservative (supports up to 1000)
+    country: str = "us"  # Filter results to US
+
+
+class GeocodioConfig(ServiceConfig):
+    """Configuration for Geocodio API."""
+
+    api_key: Optional[str] = None
+    base_url: str = "https://api.geocod.io"
+    api_version: str = "v1.9"
+    rate_limit_delay: float = 0.0  # Batch endpoint not rate limited
+    timeout: int = 600  # 10 min for large batches
+    batch_size: int = 1000  # Conservative (supports up to 10,000)
+
+
 class PhotonConfig(ServiceConfig):
     """Configuration for Photon (Komoot) Geocoder."""
 
@@ -60,6 +83,8 @@ class GeocodeServicesConfig(BaseModel):
 
     census: CensusConfig = Field(default_factory=CensusConfig)
     nominatim: NominatimConfig = Field(default_factory=NominatimConfig)
+    mapbox: MapboxConfig = Field(default_factory=MapboxConfig)
+    geocodio: GeocodioConfig = Field(default_factory=GeocodioConfig)
     photon: PhotonConfig = Field(default_factory=PhotonConfig)
     google: GoogleMapsConfig = Field(default_factory=GoogleMapsConfig)
     opencage: OpenCageConfig = Field(default_factory=OpenCageConfig)
