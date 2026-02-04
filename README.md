@@ -134,4 +134,3 @@ This tells Alembic that your database is already at the latest migration without
 - use twelve-factor methodology for configuration management.
 - use Ruff for linting and code quality checks.
 - use pytest for testing.
--
