@@ -15,3 +15,10 @@ dependencies = [
     "sqlalchemy>=2.0",
     "typer[all]>=0.21.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.15.0",
+]
