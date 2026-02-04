@@ -92,9 +92,7 @@ class GeocodeService(ABC):
         pass
 
     @abstractmethod
-    def parse_response(
-        self, response: Any, voters: list[Any]
-    ) -> list[StandardGeocodeResult]:
+    def parse_response(self, response: Any, voters: list[Any]) -> list[StandardGeocodeResult]:
         """Parse service response into standardized results.
 
         Args:

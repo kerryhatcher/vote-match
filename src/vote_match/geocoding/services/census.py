@@ -123,8 +123,7 @@ class CensusGeocoder(GeocodeService):
             f"(timeout: {self.census_config.timeout}s)"
         )
         logger.debug(
-            f"Benchmark: {self.census_config.benchmark}, "
-            f"Vintage: {self.census_config.vintage}"
+            f"Benchmark: {self.census_config.benchmark}, Vintage: {self.census_config.vintage}"
         )
 
         # Prepare multipart form data
@@ -157,9 +156,7 @@ class CensusGeocoder(GeocodeService):
             logger.error(f"Census API HTTP error: {e}")
             raise
 
-    def parse_response(
-        self, response: str, voters: list[Voter]
-    ) -> list[StandardGeocodeResult]:
+    def parse_response(self, response: str, voters: list[Voter]) -> list[StandardGeocodeResult]:
         """Parse Census API response into standardized results.
 
         The Census API returns CSV with format:
@@ -214,8 +211,7 @@ class CensusGeocoder(GeocodeService):
                 status = GeocodeQuality.INTERPOLATED
             else:
                 logger.warning(
-                    f"Unknown match indicator '{match_indicator}' "
-                    f"for voter {registration_number}"
+                    f"Unknown match indicator '{match_indicator}' for voter {registration_number}"
                 )
                 status = GeocodeQuality.FAILED
 

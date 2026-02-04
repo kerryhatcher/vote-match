@@ -94,9 +94,7 @@ class Settings(BaseSettings):
     )
 
     # Geocoding service configurations
-    geocode_services: GeocodeServicesConfig = Field(
-        default_factory=GeocodeServicesConfig
-    )
+    geocode_services: GeocodeServicesConfig = Field(default_factory=GeocodeServicesConfig)
     default_geocode_service: str = Field(
         default="census", description="Default geocoding service to use"
     )

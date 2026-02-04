@@ -538,11 +538,17 @@ def load_csv(
 
 @app.command()
 def geocode(
+    service: str | None = typer.Option(
+        None,
+        "--service",
+        "-s",
+        help="Geocoding service to use (default: census). Use 'list' to see available services",
+    ),
     batch_size: int | None = typer.Option(
         None,
         "--batch-size",
         "-b",
-        help="Records per API call (max 10000)",
+        help="Records per batch",
     ),
     limit: int | None = typer.Option(
         None,
@@ -550,101 +556,134 @@ def geocode(
         "-l",
         help="Total records to process",
     ),
+    only_unmatched: bool | None = typer.Option(
+        None,
+        "--only-unmatched/--all",
+        help="Process only no_match records from previous attempts (default: True for non-Census, False for Census)",
+    ),
     retry_failed: bool = typer.Option(
         False,
         "--retry-failed",
-        help="Retry previously failed records (API/batch errors)",
-    ),
-    retry_no_match: bool = typer.Option(
-        False,
-        "--retry-no-match",
-        help="Retry records with no geocoding match",
+        help="Retry previously failed records",
     ),
 ) -> None:
-    """Geocode voter addresses using US Census Batch Geocoder."""
-    logger.info(
-        "geocode command called with batch_size={}, limit={}, retry_failed={}, retry_no_match={}",
-        batch_size,
-        limit,
-        retry_failed,
-        retry_no_match,
-    )
+    """Geocode voter addresses using specified service.
+
+    Cascading Strategy:
+    - Census (default): Processes all ungeocoded voters
+    - Other services: Process only no_match records from previous attempts
+
+    Examples:
+        vote-match geocode                           # Use Census (default)
+        vote-match geocode --service nominatim       # Use Nominatim
+        vote-match geocode --service census --all    # Force Census to process all voters
+    """
+    # Import geocoding modules
+    from vote_match.geocoding.registry import GeocodeServiceRegistry
+    from vote_match.geocoding.services import census, nominatim  # noqa: F401 - ensure services are registered
+    from vote_match.processing import process_geocoding_service
 
     settings = get_settings()
+
+    # Handle 'list' command
+    if service == "list":
+        typer.echo("Available geocoding services:")
+        for svc in GeocodeServiceRegistry.list_services():
+            typer.echo(f"  - {svc}")
+        return
+
+    # Use default service if not specified
+    service_name = service or settings.default_geocode_service
 
     # Use default batch size if not specified
     if batch_size is None:
         batch_size = settings.default_batch_size
-        logger.debug("Using default batch size: {}", batch_size)
 
-    # Validate batch size
-    if batch_size > 10000:
-        typer.secho(
-            "Error: batch_size cannot exceed 10000 (Census API limit)",
-            fg=typer.colors.RED,
-            bold=True,
-        )
-        raise typer.Exit(code=1)
+    # Default behavior for only_unmatched
+    # Census processes all ungeocoded voters, other services only process no_match
+    if only_unmatched is None:
+        only_unmatched = service_name != "census"
+
+    logger.info(
+        f"geocode command called with service={service_name}, batch_size={batch_size}, "
+        f"limit={limit}, only_unmatched={only_unmatched}, retry_failed={retry_failed}"
+    )
 
     try:
+        # Get geocoding service
+        try:
+            geocoding_service = GeocodeServiceRegistry.get_service(service_name, settings)
+        except ValueError as e:
+            typer.secho(str(e), fg=typer.colors.RED, bold=True)
+            typer.secho(
+                "\nUse 'vote-match geocode --service list' to see available services",
+                fg=typer.colors.YELLOW,
+            )
+            raise typer.Exit(code=1)
+
         # Get database connection
         engine = get_engine(settings)
         session = get_session(engine)
 
         try:
-            # Import processing module
-            from vote_match.processing import process_geocoding
+            # Display strategy info
+            if only_unmatched:
+                typer.echo(
+                    "Strategy: Processing only no_match records from previous geocoding attempts"
+                )
+            else:
+                typer.echo("Strategy: Processing all voters without geocoding results")
+
+            typer.echo(f"Service: {geocoding_service.service_name}")
+            typer.echo(f"Batch size: {batch_size}")
+            if limit:
+                typer.echo(f"Limit: {limit}")
+            typer.echo("")
 
             # Process geocoding with progress indication
-            typer.echo("Starting geocoding process...")
-
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 transient=False,
             ) as progress:
-                task = progress.add_task("Geocoding addresses...", total=None)
+                task = progress.add_task(f"Geocoding with {service_name}...", total=None)
 
                 # Process geocoding
-                stats = process_geocoding(
+                stats = process_geocoding_service(
                     session=session,
-                    settings=settings,
+                    service=geocoding_service,
                     batch_size=batch_size,
                     limit=limit,
+                    only_unmatched=only_unmatched,
                     retry_failed=retry_failed,
-                    retry_no_match=retry_no_match,
                 )
 
                 progress.update(task, completed=True)
 
             # Display results
-            from rich.table import Table
             from rich.console import Console
+            from rich.table import Table
 
             console = Console()
 
-            table = Table(title="Geocoding Results", show_header=True, header_style="bold magenta")
+            table = Table(
+                title=f"Geocoding Results ({service_name})",
+                show_header=True,
+                header_style="bold magenta",
+            )
             table.add_column("Status", style="cyan")
             table.add_column("Count", justify="right", style="green")
             table.add_column("Percentage", justify="right", style="yellow")
 
-            total = stats["total_processed"]
+            total = stats["total"]
             if total > 0:
-                table.add_row(
-                    "Matched",
-                    str(stats["matched"]),
-                    f"{stats['matched'] / total * 100:.1f}%",
-                )
-                table.add_row(
-                    "No Match",
-                    str(stats["no_match"]),
-                    f"{stats['no_match'] / total * 100:.1f}%",
-                )
-                table.add_row(
-                    "Failed",
-                    str(stats["failed"]),
-                    f"{stats['failed'] / total * 100:.1f}%",
-                )
+                for status in ["exact", "interpolated", "approximate", "no_match", "failed"]:
+                    if stats[status] > 0:
+                        table.add_row(
+                            status.replace("_", " ").title(),
+                            str(stats[status]),
+                            f"{stats[status] / total * 100:.1f}%",
+                        )
                 table.add_row(
                     "Total",
                     str(total),
@@ -663,9 +702,10 @@ def geocode(
                     fg=typer.colors.GREEN,
                     bold=True,
                 )
-                if stats["matched"] > 0:
+                successful = stats["exact"] + stats["interpolated"] + stats["approximate"]
+                if successful > 0:
                     typer.secho(
-                        f"  {stats['matched']:,} addresses geocoded successfully",
+                        f"  {successful:,} addresses geocoded successfully",
                         fg=typer.colors.GREEN,
                     )
                 if stats["no_match"] > 0:
@@ -689,9 +729,9 @@ def geocode(
             engine.dispose()
 
     except Exception as e:
-        logger.error("Geocoding failed: {}", str(e))
+        logger.error(f"Geocoding failed: {e}")
         typer.secho(
-            f"✗ Geocoding failed: {str(e)}",
+            f"✗ Geocoding failed: {e}",
             fg=typer.colors.RED,
             bold=True,
         )

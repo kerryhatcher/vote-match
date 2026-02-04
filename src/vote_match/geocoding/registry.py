@@ -11,9 +11,7 @@ class GeocodeServiceRegistry:
     _services: dict[str, type[GeocodeService]] = {}
 
     @classmethod
-    def register(
-        cls, service_class: type[GeocodeService]
-    ) -> type[GeocodeService]:
+    def register(cls, service_class: type[GeocodeService]) -> type[GeocodeService]:
         """Decorator to register a geocoding service.
 
         Args:
@@ -50,10 +48,7 @@ class GeocodeServiceRegistry:
         """
         if name not in cls._services:
             available = ", ".join(cls.list_services())
-            raise ValueError(
-                f"Unknown geocoding service: {name}. "
-                f"Available services: {available}"
-            )
+            raise ValueError(f"Unknown geocoding service: {name}. Available services: {available}")
         return cls._services[name](config)
 
     @classmethod

@@ -1,6 +1,5 @@
 """SQLAlchemy models for Vote Match application."""
 
-from datetime import datetime
 from typing import Optional
 
 from geoalchemy2 import Geometry

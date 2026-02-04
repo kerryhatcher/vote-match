@@ -442,3 +442,396 @@ def process_usps_validation(
         stats["total_processed"] = len(voters)
 
     return stats
+
+
+# ====================================================================
+# NEW MULTI-SERVICE GEOCODING FUNCTIONS
+# ====================================================================
+
+
+def get_voters_for_geocoding(
+    session: Session,
+    service_name: str,
+    limit: Optional[int] = None,
+    only_unmatched: bool = True,
+    retry_failed: bool = False,
+) -> list[Voter]:
+    """Get voters that need geocoding from specified service.
+
+    Implements cascading strategy:
+    - Census (only_unmatched=False): Find voters with NO results at all
+    - Other services (only_unmatched=True): Find voters where best result
+      from ANY service is no_match/failed, AND they haven't been processed
+      by THIS specific service yet
+
+    Args:
+        session: SQLAlchemy session
+        service_name: Name of the geocoding service
+        limit: Maximum number of voters to return
+        only_unmatched: If True, only return voters with no_match/failed from ANY service
+                       If False, only return voters with no results at all
+        retry_failed: If True, include voters with failed status
+
+    Returns:
+        List of Voter objects needing geocoding
+    """
+    query = session.query(Voter)
+
+    if only_unmatched:
+        # CASCADING STRATEGY: Find voters with no successful geocode from ANY service
+        # Subquery to get best result status for each voter
+        best_status_subquery = (
+            session.query(
+                GeocodeResultModel.voter_id,
+                func.min(
+                    case(
+                        (GeocodeResultModel.status == "exact", 1),
+                        (GeocodeResultModel.status == "interpolated", 2),
+                        (GeocodeResultModel.status == "approximate", 3),
+                        (GeocodeResultModel.status == "no_match", 4),
+                        (GeocodeResultModel.status == "failed", 5),
+                        else_=6,
+                    )
+                ).label("best_quality"),
+            )
+            .group_by(GeocodeResultModel.voter_id)
+            .subquery()
+        )
+
+        # Join with subquery
+        query = query.outerjoin(
+            best_status_subquery,
+            Voter.voter_registration_number == best_status_subquery.c.voter_id,
+        )
+
+        if retry_failed:
+            # Include voters with no_match OR failed as best result
+            query = query.filter(
+                or_(
+                    best_status_subquery.c.best_quality.is_(None),  # No results at all
+                    best_status_subquery.c.best_quality >= 4,  # no_match or failed
+                )
+            )
+        else:
+            # Only include voters with no_match as best result (not failed)
+            query = query.filter(
+                or_(
+                    best_status_subquery.c.best_quality.is_(None),  # No results at all
+                    best_status_subquery.c.best_quality == 4,  # no_match only
+                )
+            )
+
+        # Exclude voters already processed by THIS specific service
+        this_service_subquery = (
+            session.query(GeocodeResultModel.voter_id)
+            .filter(GeocodeResultModel.service_name == service_name)
+            .subquery()
+        )
+        query = query.outerjoin(
+            this_service_subquery,
+            Voter.voter_registration_number == this_service_subquery.c.voter_id,
+        )
+        query = query.filter(this_service_subquery.c.voter_id.is_(None))
+
+    else:
+        # DEFAULT STRATEGY (Census): Find voters with NO geocoding results at all
+        any_result_subquery = session.query(GeocodeResultModel.voter_id).distinct().subquery()
+        query = query.outerjoin(
+            any_result_subquery,
+            Voter.voter_registration_number == any_result_subquery.c.voter_id,
+        )
+        query = query.filter(any_result_subquery.c.voter_id.is_(None))
+
+    # Order consistently
+    query = query.order_by(Voter.voter_registration_number)
+
+    if limit:
+        query = query.limit(limit)
+
+    voters = query.all()
+
+    if only_unmatched:
+        logger.info(
+            f"Found {len(voters)} voters needing geocoding with {service_name} "
+            f"(only unmatched, retry_failed={retry_failed})"
+        )
+    else:
+        logger.info(f"Found {len(voters)} voters with no geocoding results for {service_name}")
+
+    return voters
+
+
+def save_geocode_results(session: Session, results: list[StandardGeocodeResult]) -> int:
+    """Save geocoding results to the database.
+
+    Args:
+        session: SQLAlchemy session
+        results: List of StandardGeocodeResult objects
+
+    Returns:
+        Count of saved records
+    """
+    saved_count = 0
+
+    for result in results:
+        # Create GeocodeResult model instance
+        geocode_result = GeocodeResultModel(
+            voter_id=result.voter_id,
+            service_name=result.service_name,
+            status=result.status.value,
+            longitude=result.longitude,
+            latitude=result.latitude,
+            matched_address=result.matched_address,
+            match_confidence=result.match_confidence,
+            raw_response=result.raw_response,
+            error_message=result.error_message,
+        )
+
+        session.add(geocode_result)
+        saved_count += 1
+
+        logger.debug(
+            f"Saved {result.service_name} result for voter {result.voter_id}: {result.status.value}"
+        )
+
+    session.commit()
+    logger.info(f"Saved {saved_count} geocoding results to database")
+
+    return saved_count
+
+
+def process_geocoding_service(
+    session: Session,
+    service: GeocodeService,
+    batch_size: int = 10000,
+    limit: Optional[int] = None,
+    only_unmatched: bool = True,
+    retry_failed: bool = False,
+) -> dict[str, int]:
+    """Unified geocoding processing pipeline for any service.
+
+    Args:
+        session: SQLAlchemy session
+        service: GeocodeService instance to use
+        batch_size: Records per batch
+        limit: Maximum total records to process
+        only_unmatched: Only process voters with no successful match from any service
+        retry_failed: Include voters with failed status
+
+    Returns:
+        Dictionary with statistics:
+        - total: Total records processed
+        - exact: Exact matches
+        - interpolated: Interpolated matches
+        - approximate: Approximate matches
+        - no_match: No matches found
+        - failed: Failed records
+    """
+    from vote_match.geocoding.base import GeocodeQuality
+
+    # Initialize statistics
+    stats = {
+        "total": 0,
+        "exact": 0,
+        "interpolated": 0,
+        "approximate": 0,
+        "no_match": 0,
+        "failed": 0,
+    }
+
+    # Get voters needing geocoding
+    voters = get_voters_for_geocoding(
+        session=session,
+        service_name=service.service_name,
+        limit=limit,
+        only_unmatched=only_unmatched,
+        retry_failed=retry_failed,
+    )
+
+    if not voters:
+        logger.info(f"No voters to geocode with {service.service_name}")
+        return stats
+
+    logger.info(
+        f"Processing {len(voters)} voters with {service.service_name} in batches of {batch_size}"
+    )
+
+    # Process in batches
+    for i in range(0, len(voters), batch_size):
+        batch = voters[i : i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (len(voters) + batch_size - 1) // batch_size
+
+        logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} records)")
+
+        try:
+            # Geocode batch using service
+            results = service.geocode_batch(batch)
+
+            # Save results to database
+            save_geocode_results(session, results)
+
+            # Update statistics
+            stats["total"] += len(results)
+            for result in results:
+                status = result.status.value
+                if status in stats:
+                    stats[status] += 1
+                else:
+                    stats["failed"] += 1
+
+            logger.info(
+                f"Batch {batch_num}/{total_batches} completed: "
+                f"{sum(1 for r in results if r.status.value == 'exact')} exact, "
+                f"{sum(1 for r in results if r.status.value == 'interpolated')} interpolated, "
+                f"{sum(1 for r in results if r.status.value == 'approximate')} approximate, "
+                f"{sum(1 for r in results if r.status.value == 'no_match')} no_match, "
+                f"{sum(1 for r in results if r.status.value == 'failed')} failed"
+            )
+
+        except Exception as e:
+            # On error, mark batch as failed
+            logger.error(f"Batch {batch_num}/{total_batches} failed: {e}")
+
+            # Create failed results for this batch
+            failed_results = [
+                StandardGeocodeResult(
+                    voter_id=voter.voter_registration_number,
+                    service_name=service.service_name,
+                    status=GeocodeQuality.FAILED,
+                    longitude=None,
+                    latitude=None,
+                    matched_address=None,
+                    match_confidence=None,
+                    raw_response={},
+                    error_message=str(e),
+                )
+                for voter in batch
+            ]
+
+            save_geocode_results(session, failed_results)
+            stats["failed"] += len(batch)
+            stats["total"] += len(batch)
+
+    logger.info(
+        f"Geocoding complete with {service.service_name}: "
+        f"{stats['total']} total, "
+        f"{stats['exact']} exact, "
+        f"{stats['interpolated']} interpolated, "
+        f"{stats['approximate']} approximate, "
+        f"{stats['no_match']} no_match, "
+        f"{stats['failed']} failed"
+    )
+
+    return stats
+
+
+def sync_best_geocode_to_voters(
+    session: Session,
+    limit: Optional[int] = None,
+    force_update: bool = False,
+    update_legacy_fields: bool = True,
+) -> dict[str, int]:
+    """Sync best geocoding result to Voter table for QGIS display.
+
+    This function updates the Voter table's geom column (and optionally
+    legacy geocode_* fields) with the best geocoding result from the
+    GeocodeResult table. Required for QGIS visualization.
+
+    Args:
+        session: SQLAlchemy session
+        limit: Maximum number of voters to process (None for all)
+        force_update: If True, update even if geom already exists
+        update_legacy_fields: If True, also update legacy geocode_* fields
+
+    Returns:
+        Dictionary with statistics:
+        - total_processed: Voters examined
+        - updated: Voters with geometry updated
+        - skipped_no_results: Voters with no geocode results
+        - skipped_no_coords: Voters with results but no coordinates
+        - skipped_already_set: Voters with geom already set (force_update=False)
+    """
+    stats = {
+        "total_processed": 0,
+        "updated": 0,
+        "skipped_no_results": 0,
+        "skipped_no_coords": 0,
+        "skipped_already_set": 0,
+    }
+
+    # Build query for voters with geocode results
+    query = session.query(Voter)
+
+    if not force_update:
+        # Only process voters without geometry
+        query = query.filter(Voter.geom.is_(None))
+
+    # Order consistently
+    query = query.order_by(Voter.voter_registration_number)
+
+    if limit:
+        query = query.limit(limit)
+
+    voters = query.all()
+    logger.info(
+        f"Syncing best geocode results to {len(voters)} voters "
+        f"(force_update={force_update}, update_legacy_fields={update_legacy_fields})"
+    )
+
+    for voter in voters:
+        stats["total_processed"] += 1
+
+        # Get best geocode result using model property
+        best_result = voter.best_geocode_result
+
+        if not best_result:
+            stats["skipped_no_results"] += 1
+            logger.debug(f"Voter {voter.voter_registration_number} has no geocode results")
+            continue
+
+        # Check if result has valid coordinates
+        if best_result.longitude is None or best_result.latitude is None:
+            stats["skipped_no_coords"] += 1
+            logger.debug(
+                f"Voter {voter.voter_registration_number} best result has no coordinates "
+                f"(status={best_result.status})"
+            )
+            continue
+
+        # Skip if already has geometry and not forcing update
+        if not force_update and voter.geom is not None:
+            stats["skipped_already_set"] += 1
+            continue
+
+        # Update geometry
+        wkt = f"POINT({best_result.longitude} {best_result.latitude})"
+        voter.geom = WKTElement(wkt, srid=4326)
+
+        # Update legacy fields if requested
+        if update_legacy_fields:
+            voter.geocode_status = best_result.status
+            voter.geocode_matched_address = best_result.matched_address
+            voter.geocode_longitude = best_result.longitude
+            voter.geocode_latitude = best_result.latitude
+
+            # Note: Legacy fields like tigerline_id, FIPS codes, etc.
+            # are Census-specific and stored in raw_response
+            # We don't populate them here to keep it service-agnostic
+
+        stats["updated"] += 1
+
+        if stats["updated"] % 1000 == 0:
+            logger.info(f"Progress: {stats['updated']} voters updated...")
+
+    # Commit all updates
+    session.commit()
+
+    logger.info(
+        f"Sync complete: {stats['updated']} updated, "
+        f"{stats['skipped_no_results']} no results, "
+        f"{stats['skipped_no_coords']} no coords, "
+        f"{stats['skipped_already_set']} already set"
+    )
+
+    return stats
