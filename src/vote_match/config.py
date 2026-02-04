@@ -41,6 +41,22 @@ class Settings(BaseSettings):
         default=300,
         description="Timeout for Census API requests in seconds",
     )
+    usps_client_id: str = Field(
+        default="",
+        description="USPS API OAuth2 Client ID",
+    )
+    usps_client_secret: str = Field(
+        default="",
+        description="USPS API OAuth2 Client Secret",
+    )
+    usps_base_url: str = Field(
+        default="https://apis.usps.com/addresses/v3",
+        description="USPS API base URL (use https://apis-tem.usps.com/addresses/v3 for testing)",
+    )
+    usps_timeout: int = Field(
+        default=60,
+        description="Timeout for USPS API requests in seconds",
+    )
 
 
 def get_settings() -> Settings:

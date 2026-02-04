@@ -98,11 +98,25 @@ class Voter(Base):
     # PostGIS geometry column (populated from geocode lat/lon)
     geom = Column(Geometry("POINT", srid=4326), nullable=True)
 
+    # USPS validation result fields (added by USPS validator)
+    usps_validation_status = Column(String, nullable=True, index=True)
+    usps_validated_street_address = Column(String, nullable=True)
+    usps_validated_city = Column(String, nullable=True)
+    usps_validated_state = Column(String, nullable=True)
+    usps_validated_zipcode = Column(String, nullable=True)
+    usps_validated_zipplus4 = Column(String, nullable=True)
+    usps_delivery_point = Column(String, nullable=True)
+    usps_carrier_route = Column(String, nullable=True)
+    usps_dpv_confirmation = Column(String, nullable=True)
+    usps_business = Column(String, nullable=True)
+    usps_vacant = Column(String, nullable=True)
+
     # Additional indexes
     __table_args__ = (
         Index("idx_voter_geocode_status", "geocode_status"),
         Index("idx_voter_county", "county"),
         Index("idx_voter_county_precinct", "county_precinct"),
+        Index("idx_voter_usps_validation", "usps_validation_status"),
     )
 
     def build_street_address(self) -> str:

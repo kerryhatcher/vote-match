@@ -402,6 +402,154 @@ def geocode(
 
 
 @app.command()
+def validate_usps(
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Total records to validate",
+    ),
+    retry_failed: bool = typer.Option(
+        False,
+        "--retry-failed",
+        help="Retry previously failed validations",
+    ),
+) -> None:
+    """Validate voter addresses using USPS Address Validation API."""
+    logger.info(
+        "validate-usps command called with limit={}, retry_failed={}",
+        limit,
+        retry_failed,
+    )
+
+    settings = get_settings()
+
+    # Check that USPS credentials are configured
+    if not settings.usps_client_id or not settings.usps_client_secret:
+        typer.secho(
+            "Error: USPS API credentials not configured",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        typer.secho(
+            "Please set VOTE_MATCH_USPS_CLIENT_ID and VOTE_MATCH_USPS_CLIENT_SECRET",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        # Get database connection
+        engine = get_engine(settings)
+        session = get_session(engine)
+
+        try:
+            # Import processing module
+            from vote_match.processing import process_usps_validation
+
+            # Process USPS validation with progress indication
+            typer.echo("Starting USPS validation process...")
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Validating addresses...", total=None)
+
+                # Process validation
+                stats = process_usps_validation(
+                    session=session,
+                    settings=settings,
+                    limit=limit,
+                    retry_failed=retry_failed,
+                )
+
+                progress.update(task, completed=True)
+
+            # Display results
+            from rich.table import Table
+            from rich.console import Console
+
+            console = Console()
+
+            table = Table(
+                title="USPS Validation Results", show_header=True, header_style="bold magenta"
+            )
+            table.add_column("Status", style="cyan")
+            table.add_column("Count", justify="right", style="green")
+            table.add_column("Percentage", justify="right", style="yellow")
+
+            total = stats["total_processed"]
+            if total > 0:
+                table.add_row(
+                    "Validated (Matched as-is)",
+                    str(stats["validated"]),
+                    f"{stats['validated'] / total * 100:.1f}%",
+                )
+                table.add_row(
+                    "Corrected (USPS updated)",
+                    str(stats["corrected"]),
+                    f"{stats['corrected'] / total * 100:.1f}%",
+                )
+                table.add_row(
+                    "Failed",
+                    str(stats["failed"]),
+                    f"{stats['failed'] / total * 100:.1f}%",
+                )
+                table.add_row(
+                    "Total",
+                    str(total),
+                    "100.0%",
+                    style="bold",
+                )
+            else:
+                table.add_row("No records processed", "0", "0.0%")
+
+            console.print(table)
+
+            # Success message
+            if total > 0:
+                typer.secho(
+                    f"\n✓ Successfully processed {total:,} records",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+                if stats["validated"] > 0:
+                    typer.secho(
+                        f"  {stats['validated']:,} addresses validated as-is",
+                        fg=typer.colors.GREEN,
+                    )
+                if stats["corrected"] > 0:
+                    typer.secho(
+                        f"  {stats['corrected']:,} addresses corrected by USPS",
+                        fg=typer.colors.GREEN,
+                    )
+                if stats["failed"] > 0:
+                    typer.secho(
+                        f"  {stats['failed']:,} records failed validation",
+                        fg=typer.colors.RED,
+                    )
+            else:
+                typer.secho(
+                    "No pending records to validate",
+                    fg=typer.colors.YELLOW,
+                )
+
+        finally:
+            session.close()
+            engine.dispose()
+
+    except Exception as e:
+        logger.error("USPS validation failed: {}", str(e))
+        typer.secho(
+            f"✗ USPS validation failed: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def status() -> None:
     """Display status of voter records (loaded, geocoded, matched)."""
     logger.info("status command called")
@@ -532,6 +680,60 @@ def status() -> None:
                     )
 
                 console.print(county_table)
+                console.print()
+
+            # Query USPS validation status counts
+            usps_stmt = select(
+                Voter.usps_validation_status,
+                func.count().label("count"),
+            ).group_by(Voter.usps_validation_status)
+            usps_results = session.execute(usps_stmt).all()
+
+            # Build USPS status counts dictionary
+            usps_status_counts = {}
+            for status, count in usps_results:
+                if status is None:
+                    usps_status_counts["pending"] = count
+                else:
+                    usps_status_counts[status] = count
+
+            # Only display USPS table if there's any USPS data
+            if usps_status_counts:
+                usps_pending = usps_status_counts.get("pending", 0)
+                usps_validated = usps_status_counts.get("validated", 0)
+                usps_corrected = usps_status_counts.get("corrected", 0)
+                usps_failed = usps_status_counts.get("failed", 0)
+                usps_total = usps_pending + usps_validated + usps_corrected + usps_failed
+
+                usps_table = Table(
+                    title="USPS Validation Status", show_header=True, header_style="bold magenta"
+                )
+                usps_table.add_column("Status", style="cyan")
+                usps_table.add_column("Count", justify="right", style="green")
+                usps_table.add_column("Percent", justify="right")
+
+                usps_table.add_row(
+                    "Pending",
+                    f"{usps_pending:,}",
+                    f"{usps_pending / usps_total * 100:.1f}%" if usps_total > 0 else "0.0%",
+                )
+                usps_table.add_row(
+                    "Validated (as-is)",
+                    f"{usps_validated:,}",
+                    f"{usps_validated / usps_total * 100:.1f}%" if usps_total > 0 else "0.0%",
+                )
+                usps_table.add_row(
+                    "Corrected",
+                    f"{usps_corrected:,}",
+                    f"{usps_corrected / usps_total * 100:.1f}%" if usps_total > 0 else "0.0%",
+                )
+                usps_table.add_row(
+                    "Failed",
+                    f"{usps_failed:,}",
+                    f"{usps_failed / usps_total * 100:.1f}%" if usps_total > 0 else "0.0%",
+                )
+
+                console.print(usps_table)
                 console.print()
 
         finally:
