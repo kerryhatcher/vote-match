@@ -161,6 +161,13 @@ class Voter(Base):
     usps_business = Column(String, nullable=True)
     usps_vacant = Column(String, nullable=True)
 
+    # Relationships
+    geocode_results = relationship(
+        "GeocodeResult",
+        back_populates="voter",
+        order_by="GeocodeResult.geocoded_at.desc()",
+    )
+
     # Additional indexes
     __table_args__ = (
         Index("idx_voter_geocode_status", "geocode_status"),
