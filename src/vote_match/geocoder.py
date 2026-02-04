@@ -69,13 +69,15 @@ def build_batch_csv(voters: list[Voter]) -> str:
         state = "GA"
 
         # Write row: ID, street, city, state, zip
-        writer.writerow([
-            voter.voter_registration_number,
-            street,
-            city,
-            state,
-            zipcode,
-        ])
+        writer.writerow(
+            [
+                voter.voter_registration_number,
+                street,
+                city,
+                state,
+                zipcode,
+            ]
+        )
 
     if skipped > 0:
         logger.info("Skipped {} voters with incomplete addresses", skipped)
@@ -131,7 +133,7 @@ def submit_batch(csv_content: str, settings: Settings) -> str:
         logger.info("Received response from Census API ({} bytes)", len(response.text))
         return response.text
 
-    except httpx.TimeoutException as e:
+    except httpx.TimeoutException:
         logger.error("Census API request timed out after {}s", settings.census_timeout)
         raise
 
@@ -179,7 +181,9 @@ def parse_response(response_text: str) -> list[GeocodeResult]:
         elif match_indicator == "Tie":
             status = "matched"  # Treat tie as matched (uses first match)
         else:
-            logger.warning("Unknown match indicator '{}' for voter {}", match_indicator, registration_number)
+            logger.warning(
+                "Unknown match indicator '{}' for voter {}", match_indicator, registration_number
+            )
             status = "failed"
 
         # Extract match details (only present for successful matches)
@@ -212,7 +216,12 @@ def parse_response(response_text: str) -> list[GeocodeResult]:
                         longitude = float(parts[0])
                         latitude = float(parts[1])
                 except (ValueError, IndexError) as e:
-                    logger.warning("Failed to parse coordinates '{}' for voter {}: {}", coords_str, registration_number, str(e))
+                    logger.warning(
+                        "Failed to parse coordinates '{}' for voter {}: {}",
+                        coords_str,
+                        registration_number,
+                        str(e),
+                    )
 
             # TIGER/Line fields
             tigerline_id = row[6].strip() if row[6].strip() else None

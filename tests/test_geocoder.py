@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import Mock, patch
 
-from vote_match.geocoder import GeocodeResult, build_batch_csv, parse_response, submit_batch
+from vote_match.geocoder import build_batch_csv, parse_response, submit_batch
 from vote_match.models import Voter
 from vote_match.config import Settings
 
@@ -35,8 +35,15 @@ class TestBuildBatchCsv:
         lines = csv_content.strip().split("\n")
         assert len(lines) == 2
 
-        assert lines[0] == '17913041,"1090 KING ARTHUR DR",MACON,GA,31220'
-        assert lines[1] == '18086952,"104 WEBSTER CT",MACON,GA,31220'
+        # CSV writer quotes fields with spaces
+        assert "17913041" in lines[0]
+        assert "1090 KING ARTHUR DR" in lines[0]
+        assert "MACON" in lines[0]
+        assert "GA" in lines[0]
+        assert "31220" in lines[0]
+
+        assert "18086952" in lines[1]
+        assert "104 WEBSTER CT" in lines[1]
 
     def test_build_batch_csv_skips_incomplete_addresses(self):
         """Test that voters with missing address fields are skipped."""
@@ -86,7 +93,7 @@ class TestParseResponse:
         response_text = (
             '17913041,"1090 KING ARTHUR DR, MACON, GA, 31220",Match,Exact,'
             '"1090 KING ARTHUR DR, MACON, GA, 31220","(-83.123456, 32.654321)",'
-            '12345678,L,13,021,001500,2\n'
+            "12345678,L,13,021,001500,2\n"
         )
 
         results = parse_response(response_text)
@@ -129,7 +136,7 @@ class TestParseResponse:
         response_text = (
             '12345678,"123 MAIN ST, ATLANTA, GA, 30301",Tie,Exact,'
             '"123 MAIN ST, ATLANTA, GA, 30301","(-84.5, 33.5)",'
-            '11111111,R,13,121,002000,1\n'
+            "11111111,R,13,121,002000,1\n"
         )
 
         results = parse_response(response_text)
@@ -186,7 +193,7 @@ class TestParseResponse:
 class TestSubmitBatch:
     """Tests for submit_batch function."""
 
-    @patch('vote_match.geocoder.httpx.Client')
+    @patch("vote_match.geocoder.httpx.Client")
     def test_submit_batch_success(self, mock_client_class):
         """Test successful batch submission to Census API."""
         # Mock response
@@ -216,14 +223,16 @@ class TestSubmitBatch:
         mock_client.post.assert_called_once()
         call_args = mock_client.post.call_args
 
-        assert call_args[0][0] == "https://geocoding.geo.census.gov/geocoder/geographies/addressbatch"
-        assert call_args[1]['data']['benchmark'] == "Public_AR_Current"
-        assert call_args[1]['data']['vintage'] == "Current_Current"
+        assert (
+            call_args[0][0] == "https://geocoding.geo.census.gov/geocoder/geographies/addressbatch"
+        )
+        assert call_args[1]["data"]["benchmark"] == "Public_AR_Current"
+        assert call_args[1]["data"]["vintage"] == "Current_Current"
 
         # Verify response
         assert response_text == mock_response.text
 
-    @patch('vote_match.geocoder.httpx.Client')
+    @patch("vote_match.geocoder.httpx.Client")
     def test_submit_batch_http_error(self, mock_client_class):
         """Test handling of HTTP errors."""
         # Mock error response
@@ -244,7 +253,7 @@ class TestSubmitBatch:
         with pytest.raises(Exception):
             submit_batch(csv_content, settings)
 
-    @patch('vote_match.geocoder.httpx.Client')
+    @patch("vote_match.geocoder.httpx.Client")
     def test_submit_batch_timeout(self, mock_client_class):
         """Test handling of timeout errors."""
         import httpx

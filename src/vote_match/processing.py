@@ -30,9 +30,7 @@ def get_pending_voters(
     # Filter for pending voters
     if retry_failed:
         # Include both NULL and 'failed' status
-        query = query.filter(
-            (Voter.geocode_status.is_(None)) | (Voter.geocode_status == "failed")
-        )
+        query = query.filter((Voter.geocode_status.is_(None)) | (Voter.geocode_status == "failed"))
     else:
         # Only NULL (never geocoded)
         query = query.filter(Voter.geocode_status.is_(None))
@@ -68,9 +66,11 @@ def apply_geocode_results(
 
     for result in results:
         # Find voter by registration number
-        voter = session.query(Voter).filter(
-            Voter.voter_registration_number == result.registration_number
-        ).first()
+        voter = (
+            session.query(Voter)
+            .filter(Voter.voter_registration_number == result.registration_number)
+            .first()
+        )
 
         if not voter:
             logger.warning("Voter {} not found in database", result.registration_number)
@@ -93,10 +93,12 @@ def apply_geocode_results(
         if result.longitude is not None and result.latitude is not None:
             wkt = f"POINT({result.longitude} {result.latitude})"
             voter.geom = WKTElement(wkt, srid=4326)
-            logger.debug("Created geometry for voter {}: ({}, {})",
-                        result.registration_number,
-                        result.longitude,
-                        result.latitude)
+            logger.debug(
+                "Created geometry for voter {}: ({}, {})",
+                result.registration_number,
+                result.longitude,
+                result.latitude,
+            )
         else:
             voter.geom = None
 
@@ -168,10 +170,7 @@ def process_geocoding(
         batch_num = (i // batch_size) + 1
         total_batches = (len(voters) + batch_size - 1) // batch_size
 
-        logger.info("Processing batch {}/{} ({} records)",
-                   batch_num,
-                   total_batches,
-                   len(batch))
+        logger.info("Processing batch {}/{} ({} records)", batch_num, total_batches, len(batch))
 
         try:
             # Build CSV for this batch
@@ -184,7 +183,7 @@ def process_geocoding(
             results = parse_response(response_text)
 
             # Apply results to database
-            updated = apply_geocode_results(session, results)
+            apply_geocode_results(session, results)
 
             # Update statistics
             stats["total_processed"] += len(results)
@@ -196,12 +195,14 @@ def process_geocoding(
                 else:
                     stats["failed"] += 1
 
-            logger.info("Batch {}/{} completed: {} matched, {} no_match, {} failed",
-                       batch_num,
-                       total_batches,
-                       sum(1 for r in results if r.status == "matched"),
-                       sum(1 for r in results if r.status == "no_match"),
-                       sum(1 for r in results if r.status == "failed"))
+            logger.info(
+                "Batch {}/{} completed: {} matched, {} no_match, {} failed",
+                batch_num,
+                total_batches,
+                sum(1 for r in results if r.status == "matched"),
+                sum(1 for r in results if r.status == "no_match"),
+                sum(1 for r in results if r.status == "failed"),
+            )
 
         except Exception as e:
             # On error, mark entire batch as failed
@@ -214,10 +215,12 @@ def process_geocoding(
             session.commit()
             stats["total_processed"] += len(batch)
 
-    logger.info("Geocoding complete: {} total, {} matched, {} no_match, {} failed",
-               stats["total_processed"],
-               stats["matched"],
-               stats["no_match"],
-               stats["failed"])
+    logger.info(
+        "Geocoding complete: {} total, {} matched, {} no_match, {} failed",
+        stats["total_processed"],
+        stats["matched"],
+        stats["no_match"],
+        stats["failed"],
+    )
 
     return stats

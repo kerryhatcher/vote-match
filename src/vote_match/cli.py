@@ -398,22 +398,346 @@ def geocode(
 def status() -> None:
     """Display status of voter records (loaded, geocoded, matched)."""
     logger.info("status command called")
-    typer.echo("Not implemented yet")
+
+    settings = get_settings()
+
+    try:
+        # Get database connection
+        engine = get_engine(settings)
+        session = get_session(engine)
+
+        try:
+            from sqlalchemy import select, func, case
+            from rich.console import Console
+            from rich.table import Table
+
+            console = Console()
+
+            # Query total count
+            total_count = session.execute(select(func.count()).select_from(Voter)).scalar()
+
+            if total_count == 0:
+                typer.secho(
+                    "No voter records in database",
+                    fg=typer.colors.YELLOW,
+                )
+                typer.secho(
+                    "Use 'vote-match load-csv <file>' to import voter data",
+                    fg=typer.colors.YELLOW,
+                )
+                return
+
+            # Query counts by geocode status
+            status_stmt = select(
+                Voter.geocode_status,
+                func.count().label("count"),
+            ).group_by(Voter.geocode_status)
+            status_results = session.execute(status_stmt).all()
+
+            # Build status counts dictionary
+            status_counts = {}
+            for status, count in status_results:
+                if status is None:
+                    status_counts["pending"] = count
+                else:
+                    status_counts[status] = count
+
+            # Calculate individual counts
+            pending_count = status_counts.get("pending", 0)
+            matched_count = status_counts.get("matched", 0)
+            no_match_count = status_counts.get("no_match", 0)
+            failed_count = status_counts.get("failed", 0)
+
+            # Display title
+            console.print("\n[bold cyan]Voter Record Status[/bold cyan]\n")
+
+            # Create overall statistics table
+            overall_table = Table(
+                title="Overall Statistics", show_header=True, header_style="bold magenta"
+            )
+            overall_table.add_column("Status", style="cyan")
+            overall_table.add_column("Count", justify="right", style="green")
+            overall_table.add_column("Percent", justify="right")
+
+            # Add rows with formatted numbers
+            overall_table.add_row(
+                "Total",
+                f"{total_count:,}",
+                "100.0%",
+                style="bold",
+            )
+            overall_table.add_row(
+                "Pending",
+                f"{pending_count:,}",
+                f"{pending_count / total_count * 100:.1f}%" if total_count > 0 else "0.0%",
+            )
+            overall_table.add_row(
+                "Matched",
+                f"{matched_count:,}",
+                f"{matched_count / total_count * 100:.1f}%" if total_count > 0 else "0.0%",
+            )
+            overall_table.add_row(
+                "No Match",
+                f"{no_match_count:,}",
+                f"{no_match_count / total_count * 100:.1f}%" if total_count > 0 else "0.0%",
+            )
+            overall_table.add_row(
+                "Failed",
+                f"{failed_count:,}",
+                f"{failed_count / total_count * 100:.1f}%" if total_count > 0 else "0.0%",
+            )
+
+            console.print(overall_table)
+            console.print()
+
+            # Query county breakdown
+            county_stmt = (
+                select(
+                    Voter.county,
+                    func.count().label("total"),
+                    func.sum(case((Voter.geocode_status == "matched", 1), else_=0)).label(
+                        "matched"
+                    ),
+                )
+                .group_by(Voter.county)
+                .order_by(Voter.county)
+            )
+            county_results = session.execute(county_stmt).all()
+
+            # Create county breakdown table
+            if county_results:
+                county_table = Table(
+                    title="By County", show_header=True, header_style="bold magenta"
+                )
+                county_table.add_column("County", style="cyan")
+                county_table.add_column("Total", justify="right", style="green")
+                county_table.add_column("Matched", justify="right", style="green")
+                county_table.add_column("Match %", justify="right")
+
+                for county, total, matched in county_results:
+                    county_name = county if county else "(Unknown)"
+                    match_pct = (matched / total * 100) if total > 0 else 0.0
+                    county_table.add_row(
+                        county_name,
+                        f"{total:,}",
+                        f"{matched:,}",
+                        f"{match_pct:.1f}%",
+                    )
+
+                console.print(county_table)
+                console.print()
+
+        finally:
+            session.close()
+            engine.dispose()
+
+    except Exception as e:
+        logger.error("Failed to get status: {}", str(e))
+        typer.secho(
+            f"✗ Failed to get status: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command()
 def export(
-    output_file: str = typer.Argument(..., help="Path to output file"),
+    output: Path = typer.Argument(..., help="Output file path"),
     format: str = typer.Option(
-        "geojson",
+        "csv",
         "--format",
         "-f",
-        help="Output format (geojson, shapefile, csv)",
+        help="Output format: csv or geojson",
+    ),
+    matched_only: bool = typer.Option(
+        False,
+        "--matched-only",
+        help="Export only geocoded records",
     ),
 ) -> None:
-    """Export processed voter data to various formats."""
-    logger.info("export command called with output_file: {}, format: {}", output_file, format)
-    typer.echo("Not implemented yet")
+    """Export voter records to CSV or GeoJSON."""
+    logger.info(
+        "export command called with output: {}, format: {}, matched_only: {}",
+        output,
+        format,
+        matched_only,
+    )
+
+    # Validate format
+    if format not in ["csv", "geojson"]:
+        typer.secho(
+            f"✗ Invalid format: {format}. Must be 'csv' or 'geojson'",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Validate output directory exists
+    output_dir = output.parent
+    if not output_dir.exists():
+        typer.secho(
+            f"✗ Output directory does not exist: {output_dir}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+
+    try:
+        # Get database connection
+        engine = get_engine(settings)
+        session = get_session(engine)
+
+        try:
+            from sqlalchemy import select
+
+            # Build query
+            query = select(Voter)
+            if matched_only:
+                query = query.filter(Voter.geocode_status == "matched")
+
+            # Execute query with progress
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Querying database...", total=None)
+                voters = session.execute(query).scalars().all()
+                progress.update(task, completed=True)
+
+            # Check if we have records
+            if not voters:
+                typer.secho(
+                    "No records found to export",
+                    fg=typer.colors.YELLOW,
+                )
+                return
+
+            logger.info("Retrieved {} voters for export", len(voters))
+
+            # Export based on format
+            if format == "csv":
+                _export_csv(voters, output)
+            elif format == "geojson":
+                _export_geojson(voters, output)
+
+            # Success message
+            typer.secho(
+                f"\n✓ Successfully exported {len(voters):,} records to {output}",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+
+        finally:
+            session.close()
+            engine.dispose()
+
+    except Exception as e:
+        logger.error("Export failed: {}", str(e))
+        typer.secho(
+            f"✗ Export failed: {str(e)}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+def _export_csv(voters: list[Voter], output: Path) -> None:
+    """
+    Export voters to CSV format.
+
+    Args:
+        voters: List of Voter objects to export
+        output: Output file path
+    """
+    import pandas as pd
+
+    logger.info("Exporting {} voters to CSV: {}", len(voters), output)
+
+    # Convert voters to dictionaries
+    records = []
+    for voter in voters:
+        # Get all attributes except SQLAlchemy internal state
+        record = {}
+        for key in voter.__mapper__.c.keys():
+            value = getattr(voter, key)
+            # Convert geometry to WKT string if present
+            if key == "geom" and value is not None:
+                # Skip geometry column for CSV
+                continue
+            record[key] = value
+        records.append(record)
+
+    # Create DataFrame and write to CSV
+    df = pd.DataFrame(records)
+    df.to_csv(output, index=False)
+
+    logger.info("CSV export complete: {}", output)
+
+
+def _export_geojson(voters: list[Voter], output: Path) -> None:
+    """
+    Export voters to GeoJSON format.
+
+    Args:
+        voters: List of Voter objects to export
+        output: Output file path
+    """
+    import json
+
+    logger.info("Exporting {} voters to GeoJSON: {}", len(voters), output)
+
+    # Build features list
+    features = []
+    skipped = 0
+
+    for voter in voters:
+        # Only include records with valid coordinates
+        if voter.geocode_longitude is None or voter.geocode_latitude is None:
+            skipped += 1
+            continue
+
+        # Build properties dictionary (all voter fields except geom)
+        properties = {}
+        for key in voter.__mapper__.c.keys():
+            if key == "geom":
+                continue
+            value = getattr(voter, key)
+            properties[key] = value
+
+        # Build feature
+        feature = {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [voter.geocode_longitude, voter.geocode_latitude],
+            },
+            "properties": properties,
+        }
+        features.append(feature)
+
+    # Warn if records were skipped
+    if skipped > 0:
+        typer.secho(
+            f"Warning: Skipped {skipped:,} records without valid coordinates",
+            fg=typer.colors.YELLOW,
+        )
+        logger.warning("Skipped {} records without coordinates", skipped)
+
+    # Build GeoJSON FeatureCollection
+    geojson = {
+        "type": "FeatureCollection",
+        "features": features,
+    }
+
+    # Write to file
+    with open(output, "w") as f:
+        json.dump(geojson, f, indent=2)
+
+    logger.info("GeoJSON export complete: {} features written to {}", len(features), output)
 
 
 if __name__ == "__main__":
