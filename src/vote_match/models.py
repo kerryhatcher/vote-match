@@ -273,3 +273,53 @@ class Voter(Base):
             f"name='{self.first_name} {self.last_name}', "
             f"geocode_status='{self.geocode_status}')>"
         )
+
+
+class CountyCommissionDistrict(Base):
+    """Electoral district boundaries for spatial analysis.
+
+    This model stores district boundary polygons and metadata imported from
+    GeoJSON files. Used for comparing voter registration districts with their
+    actual geocoded locations via spatial joins.
+    """
+
+    __tablename__ = "county_commission_districts"
+
+    id = Column(Integer, primary_key=True)
+
+    # Core district identification fields (NOT NULL)
+    district_id = Column(String(10), nullable=False, unique=True, index=True)
+    name = Column(String(100), nullable=False)
+
+    # Representative information (nullable - some districts may be vacant)
+    rep_name = Column(String(100), nullable=True)
+    party = Column(String(50), nullable=True)
+    district_url = Column(String(255), nullable=True)
+    email = Column(String(100), nullable=True)
+    photo_url = Column(String(255), nullable=True)
+    rep_name_2 = Column(String(100), nullable=True)
+
+    # Metadata (nullable - may not always be present in source data)
+    object_id = Column(Integer, nullable=True)
+    global_id = Column(String(100), nullable=True)
+    creation_date = Column(DateTime, nullable=True)
+    creator = Column(String(100), nullable=True)
+    edit_date = Column(DateTime, nullable=True)
+    editor = Column(String(100), nullable=True)
+
+    # PostGIS geometry column (NOT NULL - districts must have boundaries)
+    # Using POLYGON (not MULTIPOLYGON) based on GeoJSON inspection
+    geom = Column(Geometry("POLYGON", srid=4326), nullable=False)
+
+    # Indexes for spatial and text queries
+    __table_args__ = (
+        Index("idx_district_geom", "geom", postgresql_using="gist"),
+        Index("idx_district_name", "name"),
+    )
+
+    def __repr__(self) -> str:
+        """String representation of CountyCommissionDistrict model."""
+        return (
+            f"<CountyCommissionDistrict(district_id='{self.district_id}', "
+            f"name='{self.name}')>"
+        )
