@@ -1583,12 +1583,13 @@ def generate_leaflet_map(
     mismatch_only: bool = False,
     exact_match_only: bool = False,
     output_path: Path | None = None,
+    html_filename: str = "index.html",
 ) -> str:
     """
     Generate an interactive Leaflet map with separate GeoJSON files.
 
     Creates a web folder structure with:
-    - index.html - Main map page
+    - {html_filename} - Main map page (default: index.html)
     - voters.{hash}.geojson - Voter data with cache-busting hash
     - districts.{hash}.geojson - District boundaries with cache-busting hash
 
@@ -1601,6 +1602,7 @@ def generate_leaflet_map(
         mismatch_only: If True, only include voters with district mismatches.
         exact_match_only: If True, only include voters with exact geocode matches.
         output_path: Path to output directory. If None, returns HTML as string.
+        html_filename: Name of the HTML file to create (default: index.html).
 
     Returns:
         Path to the generated index.html file, or HTML string if output_path is None.
@@ -1668,9 +1670,9 @@ def generate_leaflet_map(
             html = html.replace("fetch('districts.geojson')", f"fetch('{districts_filename}')")
 
         # Save HTML
-        index_path = web_dir / "index.html"
+        index_path = web_dir / html_filename
         index_path.write_text(html)
-        logger.info(f"Saved index.html: {index_path}")
+        logger.info(f"Saved {html_filename}: {index_path}")
 
         logger.info("Leaflet map web folder generated successfully")
         return str(index_path)
