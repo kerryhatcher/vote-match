@@ -328,7 +328,24 @@
 
             if (p.voter_count !== null && p.voter_count !== undefined) {
                 html += '<div class="popup-section">';
-                html += '<span class="popup-label">Voters in District:</span> ' + escapeHtml(p.voter_count) + '<br>';
+                html += '<span class="popup-label">Voters in District:</span> ' + escapeHtml(p.voter_count.toLocaleString('en-US')) + '<br>';
+                html += '</div>';
+            }
+
+            // Add mismatch counts if they exist and are > 0
+            if ((p.registered_elsewhere_count !== null && p.registered_elsewhere_count !== undefined && p.registered_elsewhere_count > 0) ||
+                (p.registered_here_elsewhere_count !== null && p.registered_here_elsewhere_count !== undefined && p.registered_here_elsewhere_count > 0)) {
+                html += '<div class="popup-section">';
+                html += '<span class="popup-label">District Mismatches:</span><br>';
+
+                if (p.registered_elsewhere_count > 0) {
+                    html += '&nbsp;&nbsp;Registered elsewhere, living here: ' + escapeHtml(p.registered_elsewhere_count.toLocaleString('en-US')) + '<br>';
+                }
+
+                if (p.registered_here_elsewhere_count > 0) {
+                    html += '&nbsp;&nbsp;Registered here, living elsewhere: ' + escapeHtml(p.registered_here_elsewhere_count.toLocaleString('en-US')) + '<br>';
+                }
+
                 html += '</div>';
             }
 
@@ -365,70 +382,85 @@
         let voterLayer = null;
         if (votersData && votersData.features && votersData.features.length > 0) {
             if (enableClustering) {
-                // Create marker cluster group
-                const markers = L.markerClusterGroup({
-                    maxClusterRadius: 80,
-                    spiderfyDistanceMultiplier: spiderfyDistanceMultiplier,
-                    showCoverageOnHover: showCoverageOnHover,
-                    zoomToBoundsOnClick: true,
-                    spiderfyOnMaxZoom: true,
-                    removeOutsideVisibleBounds: true,
-                    animate: true,
-                    animateAddingMarkers: false,
-                    disableClusteringAtZoom: clusterMaxZoom + 1,
-                    iconCreateFunction: function(cluster) {
-                        // Count markers by district in this cluster
-                        const childMarkers = cluster.getAllChildMarkers();
-                        const districtCounts = {};
-                        childMarkers.forEach(function(marker) {
-                            const district = marker.feature.properties.county_commission_district;
-                            districtCounts[district] = (districtCounts[district] || 0) + 1;
-                        });
+                // Extract unique districts from voter data
+                const districts = new Set();
+                votersData.features.forEach(function(feature) {
+                    const district = String(feature.properties.county_commission_district || 'unknown');
+                    districts.add(district);
+                });
 
-                        // Find predominant district
-                        let maxCount = 0;
-                        let predominantDistrict = null;
-                        for (const [district, count] of Object.entries(districtCounts)) {
-                            if (count > maxCount) {
-                                maxCount = count;
-                                predominantDistrict = district;
-                            }
+                // Create separate cluster group for each district
+                const districtClusterGroups = {};
+                districts.forEach(function(district) {
+                    districtClusterGroups[district] = L.markerClusterGroup({
+                        maxClusterRadius: 80,
+                        spiderfyDistanceMultiplier: spiderfyDistanceMultiplier,
+                        showCoverageOnHover: showCoverageOnHover,
+                        zoomToBoundsOnClick: true,
+                        spiderfyOnMaxZoom: true,
+                        removeOutsideVisibleBounds: true,
+                        animate: true,
+                        animateAddingMarkers: false,
+                        disableClusteringAtZoom: clusterMaxZoom + 1,
+                        iconCreateFunction: function(cluster) {
+                            // All markers in cluster are same district
+                            const count = cluster.getChildCount();
+                            const clusterColor = getVoterColor(district);
+                            return L.divIcon({
+                                html: '<div style="background-color:' + clusterColor + '"><span>' + count + '</span></div>',
+                                className: 'marker-cluster',
+                                iconSize: L.point(40, 40)
+                            });
                         }
-
-                        const clusterColor = getVoterColor(predominantDistrict);
-                        const count = cluster.getChildCount();
-
-                        return L.divIcon({
-                            html: '<div style="background-color:' + clusterColor + '"><span>' + count + '</span></div>',
-                            className: 'marker-cluster',
-                            iconSize: L.point(40, 40)
-                        });
-                    }
+                    });
                 });
 
-                // Create GeoJSON layer and add to cluster group
-                const geoJsonLayer = L.geoJSON(votersData, {
-                    pointToLayer: function(feature, latlng) {
-                        const district = feature.properties.county_commission_district;
-                        return L.circleMarker(latlng, {
-                            radius: 12,
-                            fillColor: getVoterColor(district),
-                            color: '#000',
-                            weight: 1,
-                            opacity: 1,
-                            fillOpacity: 0.7
-                        });
-                    },
-                    onEachFeature: function(feature, layer) {
-                        layer.bindPopup(createVoterPopup(feature.properties));
-                        // Store feature reference for cluster icon styling
-                        layer.feature = feature;
+                // Group features by district
+                const featuresByDistrict = {};
+                votersData.features.forEach(function(feature) {
+                    const district = String(feature.properties.county_commission_district || 'unknown');
+                    if (!featuresByDistrict[district]) {
+                        featuresByDistrict[district] = [];
                     }
+                    featuresByDistrict[district].push(feature);
                 });
 
-                markers.addLayer(geoJsonLayer);
-                voterLayer = markers;
-                voterLayer.addTo(map);
+                // Create GeoJSON layer for each district and add to respective cluster group
+                const districtLayers = {};
+                Object.keys(featuresByDistrict).forEach(function(district) {
+                    const districtGeoJSON = {
+                        type: 'FeatureCollection',
+                        features: featuresByDistrict[district]
+                    };
+
+                    const geoJsonLayer = L.geoJSON(districtGeoJSON, {
+                        pointToLayer: function(feature, latlng) {
+                            return L.circleMarker(latlng, {
+                                radius: 12,
+                                fillColor: getVoterColor(district),
+                                color: '#000',
+                                weight: 1,
+                                opacity: 1,
+                                fillOpacity: 0.7
+                            });
+                        },
+                        onEachFeature: function(feature, layer) {
+                            layer.bindPopup(createVoterPopup(feature.properties));
+                            layer.feature = feature;
+                        }
+                    });
+
+                    districtClusterGroups[district].addLayer(geoJsonLayer);
+                    districtLayers[district] = districtClusterGroups[district];
+                });
+
+                // Add all district layers to map
+                Object.values(districtLayers).forEach(function(layer) {
+                    layer.addTo(map);
+                });
+
+                // Store reference for layer controls (voterLayer becomes object of layers)
+                voterLayer = districtLayers;
             } else {
                 // Original non-clustered behavior
                 voterLayer = L.geoJSON(votersData, {
@@ -460,12 +492,33 @@
 
         // Add layer controls
         const overlayMaps = {};
+
+        // Handle voter layers
         if (voterLayer) {
-            overlayMaps["Voters"] = voterLayer;
+            if (typeof voterLayer === 'object' && !voterLayer._leaflet_id) {
+                // Multiple district layers (object with district keys)
+                const sortedDistricts = Object.keys(voterLayer).sort(function(a, b) {
+                    if (a === 'unknown') return 1;
+                    if (b === 'unknown') return -1;
+                    return parseInt(a) - parseInt(b);
+                });
+
+                sortedDistricts.forEach(function(district) {
+                    const layerName = district === 'unknown'
+                        ? 'Voters - Unknown District'
+                        : 'Voters - District ' + district;
+                    overlayMaps[layerName] = voterLayer[district];
+                });
+            } else {
+                // Single layer (non-clustered or legacy fallback)
+                overlayMaps["Voters"] = voterLayer;
+            }
         }
+
         if (districtLayer) {
             overlayMaps["Districts"] = districtLayer;
         }
+
         if (Object.keys(overlayMaps).length > 0) {
             L.control.layers(null, overlayMaps).addTo(map);
         }
