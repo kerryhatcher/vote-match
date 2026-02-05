@@ -12,7 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from alembic import command as alembic_command
 
-from vote_match.config import get_settings
+from vote_match.config import Settings, get_settings
 from vote_match.database import init_database, get_engine, get_session
 from vote_match.logging import setup_logging
 from vote_match.csv_reader import read_voter_csv, dataframe_to_dicts
@@ -1479,17 +1479,23 @@ def export(
         "--limit",
         help="Limit number of records to export",
     ),
+    upload_to_r2: bool = typer.Option(
+        False,
+        "--upload-to-r2",
+        help="Upload map to Cloudflare R2 (leaflet format only)",
+    ),
 ) -> None:
     """Export voter records to CSV, GeoJSON, or interactive Leaflet map."""
     logger.info(
         "export command called with output: {}, format: {}, matched_only: {}, "
-        "include_districts: {}, title: {}, limit: {}",
+        "include_districts: {}, title: {}, limit: {}, upload_to_r2: {}",
         output,
         format,
         matched_only,
         include_districts,
         title,
         limit,
+        upload_to_r2,
     )
 
     # Validate format
@@ -1528,6 +1534,8 @@ def export(
                     limit=limit,
                     include_districts=include_districts,
                     matched_only=matched_only,
+                    settings=settings,
+                    upload_to_r2=upload_to_r2,
                 )
                 return
 
@@ -1691,6 +1699,8 @@ def _export_leaflet(
     limit: int | None,
     include_districts: bool,
     matched_only: bool,
+    settings: Settings,
+    upload_to_r2: bool = False,
 ) -> None:
     """
     Export voters to interactive Leaflet map HTML.
@@ -1702,6 +1712,8 @@ def _export_leaflet(
         limit: Maximum number of voters to include
         include_districts: Whether to include district boundaries
         matched_only: If True, only include voters with successful geocoding
+        settings: Application settings
+        upload_to_r2: If True, upload the generated map to Cloudflare R2
     """
     from vote_match.processing import generate_leaflet_map
 
@@ -1731,6 +1743,35 @@ def _export_leaflet(
 
     logger.info("Leaflet map export complete: {}", output)
 
+    # Upload to R2 if requested
+    r2_url = None
+    if upload_to_r2:
+        from vote_match.r2_storage import upload_to_r2 as r2_upload
+
+        try:
+            # Use filename as the object key
+            object_key = output.name
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                transient=False,
+            ) as progress:
+                task = progress.add_task("Uploading to Cloudflare R2...", total=None)
+                r2_url = r2_upload(output, object_key, settings, content_type="text/html")
+                progress.update(task, completed=True)
+
+            if r2_url:
+                logger.info("Map uploaded to R2: {}", r2_url)
+            else:
+                logger.warning("Failed to upload map to R2")
+        except ValueError as e:
+            logger.error("R2 upload error: {}", str(e))
+            typer.secho(
+                f"   Warning: R2 upload failed - {str(e)}",
+                fg=typer.colors.YELLOW,
+            )
+
     # Success message
     typer.secho(
         f"\n✓ Successfully generated interactive map: {output}",
@@ -1745,10 +1786,16 @@ def _export_leaflet(
             fg=typer.colors.BLUE,
         )
 
-    typer.secho(
-        f"   Open {output} in a web browser to view the map",
-        fg=typer.colors.BLUE,
-    )
+    if r2_url:
+        typer.secho(
+            f"   Map uploaded to R2: {r2_url}",
+            fg=typer.colors.GREEN,
+        )
+    else:
+        typer.secho(
+            f"   Open {output} in a web browser to view the map",
+            fg=typer.colors.BLUE,
+        )
 
 
 @app.command()

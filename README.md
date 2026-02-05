@@ -25,6 +25,7 @@ Cloudflare R2 is used for hosting web maps and static files. https://developers.
 - pandas
 - loguru
 - typer
+- Jinja2
 
 
 ## Workflow
