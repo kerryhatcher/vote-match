@@ -158,6 +158,32 @@ class Settings(BaseSettings):
         description="Timeout for USPS API requests in seconds",
     )
 
+    # Cloudflare R2 configuration (S3-compatible object storage)
+    r2_enabled: bool = Field(
+        default=False,
+        description="Enable Cloudflare R2 upload for generated maps",
+    )
+    r2_endpoint_url: str = Field(
+        default="",
+        description="Cloudflare R2 endpoint URL (e.g., https://<account-id>.r2.cloudflarestorage.com)",
+    )
+    r2_access_key_id: str = Field(
+        default="",
+        description="Cloudflare R2 access key ID",
+    )
+    r2_secret_access_key: str = Field(
+        default="",
+        description="Cloudflare R2 secret access key",
+    )
+    r2_bucket_name: str = Field(
+        default="",
+        description="Cloudflare R2 bucket name for map uploads",
+    )
+    r2_public_url: str = Field(
+        default="",
+        description="Public URL for accessing uploaded maps (e.g., https://maps.example.com)",
+    )
+
 
 def get_settings() -> Settings:
     """Get application settings instance."""
