@@ -18,6 +18,7 @@ PostGIS is used for spatial data storage and processing.
 GDAL is used for geospatial data manipulation.
 The primary interface is a command-line interface (CLI). Use Typer to build and manage the CLI.
 Address validating via USPS API. See [USPS API spec](docs/USPS_API_addresses-v3r2_2.yaml) for details.
+Cloudflare R2 is used for hosting web maps and static files. https://developers.cloudflare.com/r2/
 
 ### Perfered Packages
 

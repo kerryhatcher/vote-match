@@ -9,6 +9,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCo
 from rich.table import Table
 from sqlalchemy import delete, select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
 from alembic import command as alembic_command
 
 from vote_match.config import get_settings
@@ -1456,26 +1457,45 @@ def export(
         "csv",
         "--format",
         "-f",
-        help="Output format: csv or geojson",
+        help="Output format: csv, geojson, or leaflet",
     ),
     matched_only: bool = typer.Option(
         False,
         "--matched-only",
         help="Export only geocoded records",
     ),
+    include_districts: bool = typer.Option(
+        False,
+        "--include-districts",
+        help="Include district boundaries (leaflet format only)",
+    ),
+    title: str = typer.Option(
+        "Voter Registration Map",
+        "--title",
+        help="Map title (leaflet format only)",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        help="Limit number of records to export",
+    ),
 ) -> None:
-    """Export voter records to CSV or GeoJSON."""
+    """Export voter records to CSV, GeoJSON, or interactive Leaflet map."""
     logger.info(
-        "export command called with output: {}, format: {}, matched_only: {}",
+        "export command called with output: {}, format: {}, matched_only: {}, "
+        "include_districts: {}, title: {}, limit: {}",
         output,
         format,
         matched_only,
+        include_districts,
+        title,
+        limit,
     )
 
     # Validate format
-    if format not in ["csv", "geojson"]:
+    if format not in ["csv", "geojson", "leaflet"]:
         typer.secho(
-            f"✗ Invalid format: {format}. Must be 'csv' or 'geojson'",
+            f"✗ Invalid format: {format}. Must be 'csv', 'geojson', or 'leaflet'",
             fg=typer.colors.RED,
             bold=True,
         )
@@ -1499,12 +1519,28 @@ def export(
         session = get_session(engine)
 
         try:
+            # Handle leaflet format separately (uses different processing logic)
+            if format == "leaflet":
+                _export_leaflet(
+                    session=session,
+                    output=output,
+                    title=title,
+                    limit=limit,
+                    include_districts=include_districts,
+                    matched_only=matched_only,
+                )
+                return
+
+            # For CSV and GeoJSON formats, query voters
             from sqlalchemy import select
 
             # Build query
             query = select(Voter)
             if matched_only:
                 query = query.filter(Voter.geocode_status == "matched")
+
+            if limit:
+                query = query.limit(limit)
 
             # Execute query with progress
             with Progress(
@@ -1646,6 +1682,73 @@ def _export_geojson(voters: list[Voter], output: Path) -> None:
         json.dump(geojson, f, indent=2)
 
     logger.info("GeoJSON export complete: {} features written to {}", len(features), output)
+
+
+def _export_leaflet(
+    session: Session,
+    output: Path,
+    title: str,
+    limit: int | None,
+    include_districts: bool,
+    matched_only: bool,
+) -> None:
+    """
+    Export voters to interactive Leaflet map HTML.
+
+    Args:
+        session: SQLAlchemy session
+        output: Output file path
+        title: Map title
+        limit: Maximum number of voters to include
+        include_districts: Whether to include district boundaries
+        matched_only: If True, only include voters with successful geocoding
+    """
+    from vote_match.processing import generate_leaflet_map
+
+    logger.info("Generating Leaflet map: {}", output)
+
+    # Show progress
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=False,
+    ) as progress:
+        task = progress.add_task("Generating interactive map...", total=None)
+
+        # Generate HTML
+        html = generate_leaflet_map(
+            session=session,
+            title=title,
+            limit=limit,
+            include_districts=include_districts,
+            matched_only=matched_only,
+        )
+
+        # Write to file
+        output.write_text(html)
+
+        progress.update(task, completed=True)
+
+    logger.info("Leaflet map export complete: {}", output)
+
+    # Success message
+    typer.secho(
+        f"\n✓ Successfully generated interactive map: {output}",
+        fg=typer.colors.GREEN,
+        bold=True,
+    )
+
+    # Additional info
+    if include_districts:
+        typer.secho(
+            "   Map includes district boundaries for visual mismatch detection",
+            fg=typer.colors.BLUE,
+        )
+
+    typer.secho(
+        f"   Open {output} in a web browser to view the map",
+        fg=typer.colors.BLUE,
+    )
 
 
 @app.command()

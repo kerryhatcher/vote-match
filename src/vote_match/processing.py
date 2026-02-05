@@ -7,7 +7,7 @@ from typing import Optional
 from geoalchemy2 import WKTElement
 from loguru import logger
 from shapely.geometry import shape
-from sqlalchemy import case, func, or_
+from sqlalchemy import case, func, or_, text
 from sqlalchemy.orm import Session
 
 from vote_match.config import Settings
@@ -1366,3 +1366,250 @@ def update_voter_district_comparison(
     )
 
     return stats
+
+
+def _get_voters_geojson(
+    session: Session,
+    limit: int | None = None,
+    matched_only: bool = False,
+) -> dict:
+    """
+    Query voters as GeoJSON using PostGIS ST_AsGeoJSON.
+
+    Args:
+        session: SQLAlchemy session.
+        limit: Maximum number of voters to include.
+        matched_only: If True, only include voters with successful geocoding.
+
+    Returns:
+        GeoJSON FeatureCollection dict.
+    """
+    logger.info("Querying voters for GeoJSON export...")
+
+    # Build query with PostGIS ST_AsGeoJSON for direct geometry conversion
+    query_sql = """
+        SELECT
+            voter_registration_number,
+            COALESCE(first_name || ' ' || last_name, 'Unknown') as full_name,
+            COALESCE(
+                residence_street_number || ' ' ||
+                COALESCE(residence_pre_direction || ' ', '') ||
+                residence_street_name || ' ' ||
+                COALESCE(residence_street_type, ''),
+                'Unknown'
+            ) as street_address,
+            residence_city,
+            status,
+            county_commission_district,
+            spatial_district_id,
+            district_mismatch,
+            geocode_status,
+            geocode_match_type,
+            ST_AsGeoJSON(geom)::json as geometry
+        FROM voters
+        WHERE geom IS NOT NULL
+    """
+
+    if matched_only:
+        query_sql += " AND geocode_status IN ('exact', 'interpolated', 'approximate')"
+
+    query_sql += " ORDER BY voter_registration_number"
+
+    if limit:
+        query_sql += f" LIMIT {limit}"
+
+    result = session.execute(text(query_sql))
+    rows = result.fetchall()
+
+    # Build GeoJSON FeatureCollection
+    features = []
+    for row in rows:
+        feature = {
+            "type": "Feature",
+            "geometry": row.geometry,
+            "properties": {
+                "voter_registration_number": row.voter_registration_number,
+                "full_name": row.full_name,
+                "street_address": row.street_address,
+                "residence_city": row.residence_city,
+                "status": row.status,
+                "county_commission_district": row.county_commission_district,
+                "spatial_district_id": row.spatial_district_id,
+                "district_mismatch": row.district_mismatch,
+                "geocode_status": row.geocode_status,
+                "geocode_match_type": row.geocode_match_type,
+            },
+        }
+        features.append(feature)
+
+    logger.info(f"Retrieved {len(features)} voters for GeoJSON export")
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+    }
+
+
+def _get_districts_geojson(session: Session) -> dict:
+    """
+    Query county commission districts as GeoJSON using PostGIS ST_AsGeoJSON.
+
+    Args:
+        session: SQLAlchemy session.
+
+    Returns:
+        GeoJSON FeatureCollection dict.
+    """
+    logger.info("Querying districts for GeoJSON export...")
+
+    # Build query with PostGIS ST_AsGeoJSON and voter counts
+    query_sql = """
+        SELECT
+            d.district_id,
+            d.name as district_name,
+            d.rep_name as representative_name,
+            d.party,
+            d.email as contact_email,
+            d.district_url as website,
+            ST_AsGeoJSON(d.geom)::json as geometry,
+            COUNT(v.voter_registration_number) as voter_count
+        FROM county_commission_districts d
+        LEFT JOIN voters v ON v.spatial_district_id = d.district_id
+        GROUP BY d.district_id, d.name, d.rep_name, d.party,
+                 d.email, d.district_url, d.geom
+        ORDER BY d.district_id
+    """
+
+    result = session.execute(text(query_sql))
+    rows = result.fetchall()
+
+    # Build GeoJSON FeatureCollection
+    features = []
+    for row in rows:
+        feature = {
+            "type": "Feature",
+            "geometry": row.geometry,
+            "properties": {
+                "district_id": row.district_id,
+                "district_name": row.district_name,
+                "representative_name": row.representative_name,
+                "party": row.party,
+                "contact_email": row.contact_email,
+                "website": row.website,
+                "voter_count": row.voter_count,
+            },
+        }
+        features.append(feature)
+
+    logger.info(f"Retrieved {len(features)} districts for GeoJSON export")
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+    }
+
+
+def _calculate_map_bounds(voters_geojson: dict, districts_geojson: dict) -> list:
+    """
+    Calculate Leaflet map bounds from GeoJSON data.
+
+    Args:
+        voters_geojson: GeoJSON FeatureCollection of voters.
+        districts_geojson: GeoJSON FeatureCollection of districts.
+
+    Returns:
+        Leaflet bounds array: [[south, west], [north, east]] or empty list if no data.
+    """
+    coords = []
+
+    # Extract coordinates from voters (points)
+    for feature in voters_geojson.get("features", []):
+        geom = feature.get("geometry")
+        if geom and geom.get("type") == "Point":
+            lon, lat = geom.get("coordinates", [None, None])
+            if lon is not None and lat is not None:
+                coords.append((lat, lon))
+
+    # Extract coordinates from districts (polygons/multipolygons)
+    for feature in districts_geojson.get("features", []):
+        geom = feature.get("geometry")
+        if geom:
+            if geom.get("type") == "Polygon":
+                # Polygon: coordinates[0] is the outer ring
+                for lon, lat in geom.get("coordinates", [[]])[0]:
+                    coords.append((lat, lon))
+            elif geom.get("type") == "MultiPolygon":
+                # MultiPolygon: coordinates[i][0] is each polygon's outer ring
+                for polygon in geom.get("coordinates", []):
+                    for lon, lat in polygon[0]:
+                        coords.append((lat, lon))
+
+    if not coords:
+        logger.warning("No coordinates found for map bounds calculation")
+        return []
+
+    # Calculate bounds
+    lats = [c[0] for c in coords]
+    lons = [c[1] for c in coords]
+
+    south = min(lats)
+    north = max(lats)
+    west = min(lons)
+    east = max(lons)
+
+    logger.info(f"Calculated map bounds: south={south}, north={north}, west={west}, east={east}")
+
+    return [[south, west], [north, east]]
+
+
+def generate_leaflet_map(
+    session: Session,
+    title: str = "Voter Registration Map",
+    limit: int | None = None,
+    include_districts: bool = False,
+    matched_only: bool = False,
+) -> str:
+    """
+    Generate an interactive Leaflet map as a self-contained HTML file.
+
+    Args:
+        session: SQLAlchemy session.
+        title: Map title.
+        limit: Maximum number of voters to include.
+        include_districts: Whether to include district boundary layer.
+        matched_only: If True, only include voters with successful geocoding.
+
+    Returns:
+        Complete HTML string for the Leaflet map.
+    """
+    logger.info(
+        f"Generating Leaflet map: title='{title}', limit={limit}, include_districts={include_districts}"
+    )
+
+    # Query data as GeoJSON
+    voters_geojson = _get_voters_geojson(session, limit=limit, matched_only=matched_only)
+
+    districts_geojson = {"type": "FeatureCollection", "features": []}
+    if include_districts:
+        districts_geojson = _get_districts_geojson(session)
+
+    # Calculate map bounds
+    bounds = _calculate_map_bounds(voters_geojson, districts_geojson)
+
+    # Load HTML template
+    template_path = Path(__file__).parent / "templates" / "leaflet_map.html"
+    if not template_path.exists():
+        msg = f"Template file not found: {template_path}"
+        raise FileNotFoundError(msg)
+
+    template_content = template_path.read_text()
+
+    # Replace template variables
+    html = template_content.replace("{{ title }}", title)
+    html = html.replace("{{ voters_geojson }}", json.dumps(voters_geojson))
+    html = html.replace("{{ districts_geojson }}", json.dumps(districts_geojson))
+    html = html.replace("{{ bounds }}", json.dumps(bounds))
+
+    logger.info("Leaflet map HTML generated successfully")
+
+    return html
