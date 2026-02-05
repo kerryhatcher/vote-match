@@ -1467,12 +1467,12 @@ def export(
     mismatch_only: bool = typer.Option(
         False,
         "--mismatch-only",
-        help="Export only voters with district mismatches (leaflet format only)",
+        help="Export only voters with district mismatches",
     ),
     exact_match_only: bool = typer.Option(
         False,
         "--exact-match-only",
-        help="Export only voters with exact geocode matches (leaflet format only)",
+        help="Export only voters with exact geocode matches",
     ),
     include_districts: bool = typer.Option(
         False,
@@ -1561,8 +1561,18 @@ def export(
 
             # Build query
             query = select(Voter)
+
+            # Apply filters (can be combined)
             if matched_only:
-                query = query.filter(Voter.geocode_status == "matched")
+                query = query.filter(
+                    Voter.geocode_status.in_(["exact", "interpolated", "approximate"])
+                )
+
+            if mismatch_only:
+                query = query.filter(Voter.district_mismatch)
+
+            if exact_match_only:
+                query = query.filter(Voter.geocode_match_type == "exact")
 
             if limit:
                 query = query.limit(limit)
