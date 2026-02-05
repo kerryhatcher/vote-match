@@ -1464,6 +1464,16 @@ def export(
         "--matched-only",
         help="Export only geocoded records",
     ),
+    mismatch_only: bool = typer.Option(
+        False,
+        "--mismatch-only",
+        help="Export only voters with district mismatches (leaflet format only)",
+    ),
+    exact_match_only: bool = typer.Option(
+        False,
+        "--exact-match-only",
+        help="Export only voters with exact geocode matches (leaflet format only)",
+    ),
     include_districts: bool = typer.Option(
         False,
         "--include-districts",
@@ -1488,10 +1498,12 @@ def export(
     """Export voter records to CSV, GeoJSON, or interactive Leaflet map."""
     logger.info(
         "export command called with output: {}, format: {}, matched_only: {}, "
-        "include_districts: {}, title: {}, limit: {}, upload_to_r2: {}",
+        "mismatch_only: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, upload_to_r2: {}",
         output,
         format,
         matched_only,
+        mismatch_only,
+        exact_match_only,
         include_districts,
         title,
         limit,
@@ -1534,6 +1546,8 @@ def export(
                     limit=limit,
                     include_districts=include_districts,
                     matched_only=matched_only,
+                    mismatch_only=mismatch_only,
+                    exact_match_only=exact_match_only,
                     settings=settings,
                     upload_to_r2=upload_to_r2,
                 )
@@ -1699,6 +1713,8 @@ def _export_leaflet(
     limit: int | None,
     include_districts: bool,
     matched_only: bool,
+    mismatch_only: bool,
+    exact_match_only: bool,
     settings: Settings,
     upload_to_r2: bool = False,
 ) -> None:
@@ -1712,12 +1728,21 @@ def _export_leaflet(
         limit: Maximum number of voters to include
         include_districts: Whether to include district boundaries
         matched_only: If True, only include voters with successful geocoding
+        mismatch_only: If True, only include voters with district mismatches
+        exact_match_only: If True, only include voters with exact geocode matches
         settings: Application settings
         upload_to_r2: If True, upload the generated map to Cloudflare R2
     """
     from vote_match.processing import generate_leaflet_map
 
     logger.info("Generating Leaflet map: {}", output)
+
+    # Determine output directory - create a 'web' folder
+    if output.is_dir():
+        web_dir = output
+    else:
+        # If output is a file path, create a web folder in the same directory
+        web_dir = output.parent / "web"
 
     # Show progress
     with Progress(
@@ -1727,21 +1752,21 @@ def _export_leaflet(
     ) as progress:
         task = progress.add_task("Generating interactive map...", total=None)
 
-        # Generate HTML
-        html = generate_leaflet_map(
+        # Generate map with web folder structure
+        index_path = generate_leaflet_map(
             session=session,
             title=title,
             limit=limit,
             include_districts=include_districts,
             matched_only=matched_only,
+            mismatch_only=mismatch_only,
+            exact_match_only=exact_match_only,
+            output_path=web_dir,
         )
-
-        # Write to file
-        output.write_text(html)
 
         progress.update(task, completed=True)
 
-    logger.info("Leaflet map export complete: {}", output)
+    logger.info("Leaflet map export complete: {}", index_path)
 
     # Upload to R2 if requested
     r2_url = None
@@ -1749,22 +1774,37 @@ def _export_leaflet(
         from vote_match.r2_storage import upload_to_r2 as r2_upload
 
         try:
-            # Use index.html as the object key for R2 (default web page)
-            object_key = "index.html"
-
+            # Upload index.html, voters.geojson, and districts.geojson
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 transient=False,
             ) as progress:
                 task = progress.add_task("Uploading to Cloudflare R2...", total=None)
-                r2_url = r2_upload(output, object_key, settings, content_type="text/html")
+
+                # Upload all files in web directory
+                from pathlib import Path
+
+                web_dir = Path(index_path).parent
+                for file_path in web_dir.glob("*"):
+                    if file_path.is_file():
+                        object_key = file_path.name
+                        content_type = (
+                            "text/html" if file_path.suffix == ".html" else "application/geo+json"
+                        )
+                        r2_upload(file_path, object_key, settings, content_type=content_type)
+                        logger.info(f"Uploaded {file_path.name} to R2")
+
+                # Construct the public URL for index.html
+                if settings.r2_public_url:
+                    r2_url = f"{settings.r2_public_url}/index.html"
+
                 progress.update(task, completed=True)
 
             if r2_url:
                 logger.info("Map uploaded to R2: {}", r2_url)
             else:
-                logger.warning("Failed to upload map to R2")
+                logger.warning("R2 upload completed but public URL not configured")
         except ValueError as e:
             logger.error("R2 upload error: {}", str(e))
             typer.secho(
@@ -1774,12 +1814,17 @@ def _export_leaflet(
 
     # Success message
     typer.secho(
-        f"\n✓ Successfully generated interactive map: {output}",
+        "\n✓ Successfully generated interactive map in web folder",
         fg=typer.colors.GREEN,
         bold=True,
     )
 
     # Additional info
+    typer.secho(
+        f"   Location: {Path(index_path).parent}",
+        fg=typer.colors.BLUE,
+    )
+
     if include_districts:
         typer.secho(
             "   Map includes district boundaries for visual mismatch detection",
@@ -1793,7 +1838,7 @@ def _export_leaflet(
         )
     else:
         typer.secho(
-            f"   Open {output} in a web browser to view the map",
+            f"   Open {index_path} in a web browser to view the map",
             fg=typer.colors.BLUE,
         )
 

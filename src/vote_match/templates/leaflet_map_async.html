@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin=""/>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        }
+
+        #map {
+            width: 100%;
+            height: 100vh;
+        }
+
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.95);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            font-size: 18px;
+            color: #333;
+        }
+
+        .loading-overlay.hidden {
+            display: none;
+        }
+
+        .info {
+            padding: 6px 8px;
+            font: 14px/16px Arial, Helvetica, sans-serif;
+            background: white;
+            background: rgba(255,255,255,0.95);
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            border-radius: 5px;
+        }
+
+        .info h4 {
+            margin: 0 0 5px;
+            color: #333;
+            font-size: 16px;
+        }
+
+        .info .count {
+            font-size: 18px;
+            font-weight: bold;
+            color: #4169E1;
+            margin: 5px 0;
+        }
+
+        .legend {
+            line-height: 22px;
+            color: #555;
+            background: white;
+            background: rgba(255,255,255,0.95);
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            max-height: 350px;
+            overflow-y: auto;
+        }
+
+        .legend h4 {
+            margin: 0 0 8px;
+            font-size: 14px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .legend i {
+            width: 18px;
+            height: 18px;
+            float: left;
+            margin-right: 8px;
+            opacity: 0.7;
+            border: 1px solid #333;
+        }
+
+        .legend .circle {
+            border-radius: 50%;
+        }
+
+        .leaflet-popup-content-wrapper {
+            border-radius: 5px;
+        }
+
+        .leaflet-popup-content {
+            margin: 13px 19px;
+            line-height: 1.4;
+        }
+
+        .popup-header {
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #333;
+        }
+
+        .popup-section {
+            margin-bottom: 8px;
+        }
+
+        .popup-label {
+            font-weight: bold;
+            color: #666;
+        }
+
+        .mismatch-warning {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            padding: 6px;
+            margin: 8px 0;
+            border-radius: 3px;
+            color: #856404;
+        }
+
+        .match-ok {
+            background: #d4edda;
+            border: 1px solid #28a745;
+            padding: 6px;
+            margin: 8px 0;
+            border-radius: 3px;
+            color: #155724;
+        }
+    </style>
+</head>
+<body>
+    <div class="loading-overlay" id="loading">
+        <div>Loading map data...</div>
+    </div>
+    <div id="map"></div>
+
+    <!-- Leaflet JavaScript -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+
+    <script>
+        // HTML escaping function for XSS protection
+        function escapeHtml(text) {
+            if (text === null || text === undefined) {
+                return '';
+            }
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
+
+        // Color scheme for districts 1-9
+        const districtColors = {
+            '1': '#4169E1',  '2': '#FFD700',  '3': '#9370DB',  '4': '#FF6347',  '5': '#FF69B4',
+            '6': '#D2691E',  '7': '#228B22',  '8': '#8B4513',  '9': '#4682B4',
+        };
+
+        function getDistrictColor(district) {
+            return districtColors[String(district)] || '#999999';
+        }
+
+        const map = L.map('map');
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+            maxZoom: 19
+        }).addTo(map);
+
+        function createVoterPopup(properties) {
+            const p = properties;
+            let html = '<div class="popup-header">' + escapeHtml(p.full_name) + '</div>';
+            html += '<div class="popup-section"><span class="popup-label">Address:</span> ' + escapeHtml(p.street_address) + '<br>';
+            if (p.residence_city) html += escapeHtml(p.residence_city) + '<br>';
+            html += '</div><div class="popup-section"><span class="popup-label">Status:</span> ' + escapeHtml(p.status) + '<br></div>';
+            html += '<div class="popup-section"><span class="popup-label">Registered District:</span> ' + escapeHtml(p.county_commission_district || 'Unknown') + '<br>';
+            html += '<span class="popup-label">Spatial District:</span> ' + escapeHtml(p.spatial_district_id || 'Unknown') + '<br></div>';
+            if (p.district_mismatch) {
+                html += '<div class="mismatch-warning">⚠️ <strong>District Mismatch!</strong><br>Voter is registered in District ' + escapeHtml(p.county_commission_district) + ' but located in District ' + escapeHtml(p.spatial_district_id) + '</div>';
+            } else if (p.spatial_district_id && p.county_commission_district) {
+                html += '<div class="match-ok">✓ Districts match</div>';
+            }
+            if (p.geocode_status) {
+                html += '<div class="popup-section"><span class="popup-label">Geocode Status:</span> ' + escapeHtml(p.geocode_status) + '<br>';
+                if (p.geocode_match_type) html += '<span class="popup-label">Match Type:</span> ' + escapeHtml(p.geocode_match_type) + '<br>';
+                html += '</div>';
+            }
+            return html;
+        }
+
+        function createDistrictPopup(properties) {
+            const p = properties;
+            let html = '<div class="popup-header">District ' + escapeHtml(p.district_id) + '</div>';
+            if (p.district_name) html += '<div class="popup-section">' + escapeHtml(p.district_name) + '<br></div>';
+            if (p.representative_name) {
+                html += '<div class="popup-section"><span class="popup-label">Representative:</span><br>' + escapeHtml(p.representative_name);
+                if (p.party) html += ' (' + escapeHtml(p.party) + ')';
+                html += '<br></div>';
+            }
+            if (p.contact_email) html += '<div class="popup-section"><span class="popup-label">Email:</span><br><a href="mailto:' + escapeHtml(p.contact_email) + '">' + escapeHtml(p.contact_email) + '</a><br></div>';
+            if (p.website) html += '<div class="popup-section"><span class="popup-label">Website:</span><br><a href="' + escapeHtml(p.website) + '" target="_blank">' + escapeHtml(p.website) + '</a><br></div>';
+            if (p.voter_count !== null && p.voter_count !== undefined) html += '<div class="popup-section"><span class="popup-label">Voters in District:</span> ' + escapeHtml(p.voter_count) + '<br></div>';
+            return html;
+        }
+
+        async function initializeMap() {
+            try {
+                const votersResponse = await fetch('voters.geojson');
+                const votersData = await votersResponse.json();
+                let districtsData = { type: 'FeatureCollection', features: [] };
+                try {
+                    const districtsResponse = await fetch('districts.geojson');
+                    if (districtsResponse.ok) districtsData = await districtsResponse.json();
+                } catch (e) { console.log('No districts data available'); }
+                const bounds = {{ bounds }};
+
+                let districtLayer = null;
+                if (districtsData && districtsData.features && districtsData.features.length > 0) {
+                    districtLayer = L.geoJSON(districtsData, {
+                        style: function(feature) {
+                            return { fillColor: getDistrictColor(feature.properties.district_id), weight: 2, opacity: 1, color: '#333', fillOpacity: 0.3 };
+                        },
+                        onEachFeature: function(feature, layer) { layer.bindPopup(createDistrictPopup(feature.properties)); }
+                    }).addTo(map);
+                }
+
+                let voterLayer = null;
+                if (votersData && votersData.features && votersData.features.length > 0) {
+                    voterLayer = L.geoJSON(votersData, {
+                        pointToLayer: function(feature, latlng) {
+                            return L.circleMarker(latlng, { radius: 6, fillColor: getDistrictColor(feature.properties.county_commission_district), color: '#000', weight: 1, opacity: 1, fillOpacity: 0.7 });
+                        },
+                        onEachFeature: function(feature, layer) { layer.bindPopup(createVoterPopup(feature.properties)); }
+                    }).addTo(map);
+                }
+
+                if (bounds && bounds.length === 2) map.fitBounds(bounds, { padding: [20, 20] });
+                else map.setView([0, 0], 2);
+
+                const overlayMaps = {};
+                if (voterLayer) overlayMaps["Voters"] = voterLayer;
+                if (districtLayer) overlayMaps["Districts"] = districtLayer;
+                if (Object.keys(overlayMaps).length > 0) L.control.layers(null, overlayMaps).addTo(map);
+
+                const info = L.control({ position: 'topright' });
+                info.onAdd = function(map) { this._div = L.DomUtil.create('div', 'info'); this.update(); return this._div; };
+                info.update = function() {
+                    const voterCount = votersData && votersData.features ? votersData.features.length : 0;
+                    const districtCount = districtsData && districtsData.features ? districtsData.features.length : 0;
+                    let html = '<h4>{{ title }}</h4><div class="count">' + voterCount.toLocaleString() + ' Voters</div>';
+                    if (districtCount > 0) html += '<div>' + districtCount + ' Districts</div>';
+                    this._div.innerHTML = html;
+                };
+                info.addTo(map);
+
+                if (districtsData && districtsData.features && districtsData.features.length > 0) {
+                    const districtLegend = L.control({ position: 'bottomright' });
+                    districtLegend.onAdd = function(map) {
+                        const div = L.DomUtil.create('div', 'legend');
+                        div.innerHTML = '<h4>District Colors</h4>';
+                        const districts = [];
+                        for (let i = 1; i <= 9; i++) {
+                            const districtId = String(i);
+                            if (districtsData.features.some(f => String(f.properties.district_id) === districtId)) districts.push(districtId);
+                        }
+                        districts.forEach(function(district) {
+                            div.innerHTML += '<i style="background:' + getDistrictColor(district) + '"></i> District ' + escapeHtml(district) + '<br>';
+                        });
+                        return div;
+                    };
+                    districtLegend.addTo(map);
+                }
+
+                if (votersData && votersData.features && votersData.features.length > 0) {
+                    const voterLegend = L.control({ position: 'bottomleft' });
+                    voterLegend.onAdd = function(map) {
+                        const div = L.DomUtil.create('div', 'legend');
+                        div.innerHTML = '<h4>Voter Colors<br>(by Registered District)</h4>';
+                        const registeredDistricts = new Set();
+                        votersData.features.forEach(function(feature) {
+                            if (feature.properties.county_commission_district) registeredDistricts.add(String(feature.properties.county_commission_district));
+                        });
+                        const sortedDistricts = Array.from(registeredDistricts).sort((a, b) => parseInt(a) - parseInt(b));
+                        sortedDistricts.forEach(function(district) {
+                            div.innerHTML += '<i class="circle" style="background:' + getDistrictColor(district) + '"></i> District ' + escapeHtml(district) + '<br>';
+                        });
+                        return div;
+                    };
+                    voterLegend.addTo(map);
+                }
+
+                document.getElementById('loading').classList.add('hidden');
+            } catch (error) {
+                console.error('Error loading map data:', error);
+                document.getElementById('loading').innerHTML = '<div>Error loading map data: ' + escapeHtml(error.message) + '</div>';
+            }
+        }
+
+        initializeMap();
+    </script>
+</body>
+</html>

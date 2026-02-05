@@ -1,5 +1,6 @@
 """Processing functions for geocoding voter records."""
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Optional
@@ -1580,9 +1581,15 @@ def generate_leaflet_map(
     matched_only: bool = False,
     mismatch_only: bool = False,
     exact_match_only: bool = False,
+    output_path: Path | None = None,
 ) -> str:
     """
-    Generate an interactive Leaflet map as a self-contained HTML file.
+    Generate an interactive Leaflet map with separate GeoJSON files.
+
+    Creates a web folder structure with:
+    - index.html - Main map page
+    - voters.{hash}.geojson - Voter data with cache-busting hash
+    - districts.{hash}.geojson - District boundaries with cache-busting hash
 
     Args:
         session: SQLAlchemy session.
@@ -1592,9 +1599,10 @@ def generate_leaflet_map(
         matched_only: If True, only include voters with successful geocoding.
         mismatch_only: If True, only include voters with district mismatches.
         exact_match_only: If True, only include voters with exact geocode matches.
+        output_path: Path to output directory. If None, returns HTML as string.
 
     Returns:
-        Complete HTML string for the Leaflet map.
+        Path to the generated index.html file, or HTML string if output_path is None.
     """
     logger.info(
         f"Generating Leaflet map: title='{title}', limit={limit}, include_districts={include_districts}, "
@@ -1617,20 +1625,69 @@ def generate_leaflet_map(
     # Calculate map bounds
     bounds = _calculate_map_bounds(voters_geojson, districts_geojson)
 
-    # Load HTML template
-    template_path = Path(__file__).parent / "templates" / "leaflet_map.html"
-    if not template_path.exists():
-        msg = f"Template file not found: {template_path}"
-        raise FileNotFoundError(msg)
+    # If output_path is provided, create web folder structure
+    if output_path:
+        # Create web directory
+        web_dir = output_path if output_path.is_dir() else output_path.parent / "web"
+        web_dir.mkdir(parents=True, exist_ok=True)
 
-    template_content = template_path.read_text()
+        # Generate voters GeoJSON with checksum
+        voters_json = json.dumps(voters_geojson, separators=(",", ":"))
+        voters_hash = hashlib.sha256(voters_json.encode()).hexdigest()[:8]
+        voters_filename = f"voters.{voters_hash}.geojson"
+        voters_path = web_dir / voters_filename
+        voters_path.write_text(voters_json)
+        logger.info(f"Saved voters GeoJSON: {voters_path}")
 
-    # Replace template variables
-    html = template_content.replace("{{ title }}", title)
-    html = html.replace("{{ voters_geojson }}", json.dumps(voters_geojson))
-    html = html.replace("{{ districts_geojson }}", json.dumps(districts_geojson))
-    html = html.replace("{{ bounds }}", json.dumps(bounds))
+        # Generate districts GeoJSON with checksum (if applicable)
+        districts_filename = None
+        if include_districts and districts_geojson["features"]:
+            districts_json = json.dumps(districts_geojson, separators=(",", ":"))
+            districts_hash = hashlib.sha256(districts_json.encode()).hexdigest()[:8]
+            districts_filename = f"districts.{districts_hash}.geojson"
+            districts_path = web_dir / districts_filename
+            districts_path.write_text(districts_json)
+            logger.info(f"Saved districts GeoJSON: {districts_path}")
 
-    logger.info("Leaflet map HTML generated successfully")
+        # Load async HTML template
+        template_path = Path(__file__).parent / "templates" / "leaflet_map_async.html"
+        if not template_path.exists():
+            msg = f"Template file not found: {template_path}"
+            raise FileNotFoundError(msg)
 
-    return html
+        template_content = template_path.read_text()
+
+        # Replace template variables
+        html = template_content.replace("{{ title }}", title)
+        html = html.replace("{{ bounds }}", json.dumps(bounds))
+
+        # Update fetch URLs to use hashed filenames
+        html = html.replace("fetch('voters.geojson')", f"fetch('{voters_filename}')")
+        if districts_filename:
+            html = html.replace("fetch('districts.geojson')", f"fetch('{districts_filename}')")
+
+        # Save HTML
+        index_path = web_dir / "index.html"
+        index_path.write_text(html)
+        logger.info(f"Saved index.html: {index_path}")
+
+        logger.info("Leaflet map web folder generated successfully")
+        return str(index_path)
+
+    else:
+        # Legacy behavior: return embedded HTML string
+        template_path = Path(__file__).parent / "templates" / "leaflet_map.html"
+        if not template_path.exists():
+            msg = f"Template file not found: {template_path}"
+            raise FileNotFoundError(msg)
+
+        template_content = template_path.read_text()
+
+        # Replace template variables
+        html = template_content.replace("{{ title }}", title)
+        html = html.replace("{{ voters_geojson }}", json.dumps(voters_geojson))
+        html = html.replace("{{ districts_geojson }}", json.dumps(districts_geojson))
+        html = html.replace("{{ bounds }}", json.dumps(bounds))
+
+        logger.info("Leaflet map HTML generated successfully")
+        return html
