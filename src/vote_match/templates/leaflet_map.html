@@ -138,6 +138,23 @@
             .legend {
                 max-height: none;
             }
+
+            /* Increase bottom spacing for mobile browser UI */
+            .leaflet-bottom.leaflet-center {
+                bottom: 80px !important; /* Move up from 10px to clear browser UI */
+            }
+
+            /* Ensure left/right bottom controls are also visible */
+            .leaflet-bottom.leaflet-left,
+            .leaflet-bottom.leaflet-right {
+                bottom: 70px !important; /* Move legends up from default position */
+            }
+
+            /* Reduce legend max-width on narrow screens */
+            .legend {
+                max-width: 180px;
+                font-size: 11px;
+            }
         }
 
         .leaflet-popup-content-wrapper {
@@ -586,7 +603,7 @@
         }
 
         // Add info control
-        const info = L.control({ position: 'topright' });
+        const info = L.control({ position: 'topleft' });
         info.onAdd = function(map) {
             this._div = L.DomUtil.create('div', 'info');
             this.update();
@@ -609,13 +626,41 @@
         const creditControl = L.control({ position: 'bottomcenter' });
         creditControl.onAdd = function(map) {
             const div = L.DomUtil.create('div', 'map-credit');
-            div.textContent = 'Created by ';
-            const link = document.createElement('a');
-            link.href = 'https://www.kerryhatcher.com';
-            link.target = '_blank';
-            link.rel = 'noopener noreferrer';
-            link.textContent = 'Kerry Hatcher';
-            div.appendChild(link);
+
+            // Copyright notice
+            const copyright = document.createElement('div');
+            copyright.innerHTML = '© Data and map graphics licensed under ';
+            const licenseLink = document.createElement('a');
+            licenseLink.href = 'https://creativecommons.org/licenses/by-sa/4.0/deed.en';
+            licenseLink.target = '_blank';
+            licenseLink.rel = 'noopener noreferrer';
+            licenseLink.textContent = 'CC BY-SA 4.0';
+            copyright.appendChild(licenseLink);
+            div.appendChild(copyright);
+
+            // Creator credit
+            const creator = document.createElement('div');
+            creator.textContent = 'Created by ';
+            const creatorLink = document.createElement('a');
+            creatorLink.href = 'https://www.kerryhatcher.com';
+            creatorLink.target = '_blank';
+            creatorLink.rel = 'noopener noreferrer';
+            creatorLink.textContent = 'Kerry Hatcher';
+            creator.appendChild(creatorLink);
+            div.appendChild(creator);
+
+            // OpenStreetMap credit
+            const osmCredit = document.createElement('div');
+            osmCredit.innerHTML = 'Map tiles © ';
+            const osmLink = document.createElement('a');
+            osmLink.href = 'https://www.openstreetmap.org/copyright';
+            osmLink.target = '_blank';
+            osmLink.rel = 'noopener noreferrer';
+            osmLink.textContent = 'OpenStreetMap';
+            osmCredit.appendChild(osmLink);
+            osmCredit.appendChild(document.createTextNode(' contributors'));
+            div.appendChild(osmCredit);
+
             return div;
         };
         creditControl.addTo(map);
