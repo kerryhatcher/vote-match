@@ -816,6 +816,7 @@ def sync_best_geocode_to_voters(
         # Update legacy fields if requested
         if update_legacy_fields:
             voter.geocode_status = best_result.status
+            voter.geocode_match_type = best_result.status  # Same as status for filtering
             voter.geocode_matched_address = best_result.matched_address
             voter.geocode_longitude = best_result.longitude
             voter.geocode_latitude = best_result.latitude
