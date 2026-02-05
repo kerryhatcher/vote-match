@@ -183,6 +183,10 @@ class Settings(BaseSettings):
         default="",
         description="Public URL for accessing uploaded maps (custom domain or R2.dev subdomain)",
     )
+    r2_folder: str = Field(
+        default="",
+        description="Optional folder path in R2 bucket for map uploads (e.g., '304urhg4ugh02u8hg430u8hg2439u84rgh')",
+    )
 
 
 def get_settings() -> Settings:

@@ -1737,12 +1737,14 @@ def _export_leaflet(
 
     logger.info("Generating Leaflet map: {}", output)
 
-    # Determine output directory - create a 'web' folder
+    # Determine output directory and HTML filename
     if output.is_dir():
         web_dir = output
+        html_filename = "index.html"
     else:
         # If output is a file path, create a web folder in the same directory
         web_dir = output.parent / "web"
+        html_filename = output.name  # Extract filename (e.g., "map.html")
 
     # Show progress
     with Progress(
@@ -1762,6 +1764,7 @@ def _export_leaflet(
             mismatch_only=mismatch_only,
             exact_match_only=exact_match_only,
             output_path=web_dir,
+            html_filename=html_filename,
         )
 
         progress.update(task, completed=True)
@@ -1795,9 +1798,14 @@ def _export_leaflet(
                         r2_upload(file_path, object_key, settings, content_type=content_type)
                         logger.info(f"Uploaded {file_path.name} to R2")
 
-                # Construct the public URL for index.html
+                # Construct the public URL for the HTML file
                 if settings.r2_public_url:
-                    r2_url = f"{settings.r2_public_url}/index.html"
+                    base_url = settings.r2_public_url.rstrip("/")
+                    if settings.r2_folder:
+                        folder = settings.r2_folder.strip("/")
+                        r2_url = f"{base_url}/{folder}/{html_filename}"
+                    else:
+                        r2_url = f"{base_url}/{html_filename}"
 
                 progress.update(task, completed=True)
 

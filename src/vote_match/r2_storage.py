@@ -54,6 +54,10 @@ def upload_to_r2(
         msg = "R2 configuration is incomplete. Check .env settings."
         raise ValueError(msg)
 
+    # Prepend folder path if configured
+    if settings.r2_folder:
+        object_key = f"{settings.r2_folder.strip('/')}/{object_key}"
+
     logger.info(f"Uploading {file_path} to R2 bucket {settings.r2_bucket_name} as {object_key}")
 
     try:
