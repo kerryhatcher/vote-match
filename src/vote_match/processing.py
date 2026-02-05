@@ -1725,6 +1725,12 @@ def generate_leaflet_map(
         html = html.replace(
             "{{ show_coverage_on_hover }}", str(settings.map_cluster_show_coverage_on_hover).lower()
         )
+        # Cluster zoom settings
+        html = html.replace("{{ cluster_zoom_far }}", str(settings.map_cluster_zoom_far))
+        html = html.replace("{{ cluster_radius_far }}", str(settings.map_cluster_radius_far))
+        html = html.replace("{{ cluster_zoom_medium }}", str(settings.map_cluster_zoom_medium))
+        html = html.replace("{{ cluster_radius_medium }}", str(settings.map_cluster_radius_medium))
+        html = html.replace("{{ cluster_radius_close }}", str(settings.map_cluster_radius_close))
 
         # Update fetch URLs to use hashed filenames
         html = html.replace("fetch('voters.geojson')", f"fetch('{voters_filename}')")
@@ -1762,6 +1768,12 @@ def generate_leaflet_map(
         html = html.replace(
             "{{ show_coverage_on_hover }}", str(settings.map_cluster_show_coverage_on_hover).lower()
         )
+        # Cluster zoom settings
+        html = html.replace("{{ cluster_zoom_far }}", str(settings.map_cluster_zoom_far))
+        html = html.replace("{{ cluster_radius_far }}", str(settings.map_cluster_radius_far))
+        html = html.replace("{{ cluster_zoom_medium }}", str(settings.map_cluster_zoom_medium))
+        html = html.replace("{{ cluster_radius_medium }}", str(settings.map_cluster_radius_medium))
+        html = html.replace("{{ cluster_radius_close }}", str(settings.map_cluster_radius_close))
 
         logger.info("Leaflet map HTML generated successfully")
         return html

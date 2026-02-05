@@ -209,6 +209,26 @@ class Settings(BaseSettings):
         default=True,
         description="Show cluster coverage area on hover",
     )
+    map_cluster_zoom_far: int = Field(
+        default=10,
+        description="Zoom threshold for far view (county/city level)",
+    )
+    map_cluster_radius_far: int = Field(
+        default=30,
+        description="Cluster radius in pixels when zoom <= far threshold",
+    )
+    map_cluster_zoom_medium: int = Field(
+        default=13,
+        description="Zoom threshold for medium view (district/neighborhood level)",
+    )
+    map_cluster_radius_medium: int = Field(
+        default=10,
+        description="Cluster radius in pixels when zoom <= medium threshold",
+    )
+    map_cluster_radius_close: int = Field(
+        default=0,
+        description="Cluster radius in pixels when zoomed in (0 = exact location only)",
+    )
 
 
 def get_settings() -> Settings:

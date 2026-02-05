@@ -101,6 +101,64 @@
             border-radius: 50%;
         }
 
+        /* Collapsible legend styles */
+        .legend-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+            margin-bottom: 8px;
+        }
+
+        .legend-header h4 {
+            margin: 0;
+            flex: 1;
+        }
+
+        .legend-toggle {
+            background: none;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            padding: 4px 8px;
+            margin-left: 8px;
+            color: #333;
+            min-width: 44px;
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .legend-toggle:hover {
+            background: rgba(0, 0, 0, 0.05);
+            border-radius: 3px;
+        }
+
+        .legend-content {
+            max-height: 350px;
+            overflow-y: auto;
+            transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
+        }
+
+        .legend.collapsed .legend-content {
+            max-height: 0;
+            opacity: 0;
+            overflow: hidden;
+        }
+
+        .legend.collapsed .legend-header {
+            margin-bottom: 0;
+        }
+
+        /* Mobile: legends start collapsed by default */
+        @media (max-width: 767px) {
+            .legend {
+                max-height: none;
+            }
+        }
+
         .leaflet-popup-content-wrapper {
             border-radius: 5px;
         }
@@ -360,7 +418,12 @@
                         const districtClusterGroups = {};
                         districts.forEach(function(district) {
                             districtClusterGroups[district] = L.markerClusterGroup({
-                                maxClusterRadius: 80,
+                                maxClusterRadius: function(zoom) {
+                                    // Balanced clustering: configurable via .env file
+                                    if (zoom <= {{ cluster_zoom_far }}) return {{ cluster_radius_far }};
+                                    if (zoom <= {{ cluster_zoom_medium }}) return {{ cluster_radius_medium }};
+                                    return {{ cluster_radius_close }};
+                                },
                                 spiderfyDistanceMultiplier: spiderfyDistanceMultiplier,
                                 showCoverageOnHover: showCoverageOnHover,
                                 zoomToBoundsOnClick: true,
@@ -497,16 +560,42 @@
                 if (districtsData && districtsData.features && districtsData.features.length > 0) {
                     const districtLegend = L.control({ position: 'bottomright' });
                     districtLegend.onAdd = function(map) {
-                        const div = L.DomUtil.create('div', 'legend');
-                        div.innerHTML = '<h4>District Colors</h4>';
+                        // Check if mobile
+                        const isMobile = window.innerWidth < 768;
+                        const div = L.DomUtil.create('div', 'legend' + (isMobile ? ' collapsed' : ''));
+
+                        // Create header with toggle button
+                        const header = L.DomUtil.create('div', 'legend-header', div);
+                        const title = L.DomUtil.create('h4', '', header);
+                        title.textContent = 'District Colors';
+                        const toggleBtn = L.DomUtil.create('button', 'legend-toggle', header);
+                        toggleBtn.innerHTML = isMobile ? '▼' : '▲';
+                        toggleBtn.setAttribute('aria-expanded', !isMobile);
+                        toggleBtn.setAttribute('aria-label', 'Toggle district legend');
+
+                        // Create content wrapper
+                        const content = L.DomUtil.create('div', 'legend-content', div);
+
+                        // Get unique districts
                         const districts = [];
                         for (let i = 1; i <= 9; i++) {
                             const districtId = String(i);
                             if (districtsData.features.some(f => String(f.properties.district_id) === districtId)) districts.push(districtId);
                         }
+
+                        // Add legend items (using innerHTML with properly escaped data)
                         districts.forEach(function(district) {
-                            div.innerHTML += '<i style="background:' + getDistrictColor(district) + '"></i> District ' + escapeHtml(district) + '<br>';
+                            content.innerHTML += '<i style="background:' + getDistrictColor(district) + '"></i> District ' + escapeHtml(district) + '<br>';
                         });
+
+                        // Add toggle functionality
+                        header.onclick = function() {
+                            div.classList.toggle('collapsed');
+                            const isCollapsed = div.classList.contains('collapsed');
+                            toggleBtn.innerHTML = isCollapsed ? '▼' : '▲';
+                            toggleBtn.setAttribute('aria-expanded', !isCollapsed);
+                        };
+
                         return div;
                     };
                     districtLegend.addTo(map);
@@ -515,16 +604,44 @@
                 if (votersData && votersData.features && votersData.features.length > 0) {
                     const voterLegend = L.control({ position: 'bottomleft' });
                     voterLegend.onAdd = function(map) {
-                        const div = L.DomUtil.create('div', 'legend');
-                        div.innerHTML = '<h4>Voter Colors<br>(by Registered District)</h4>';
+                        // Check if mobile
+                        const isMobile = window.innerWidth < 768;
+                        const div = L.DomUtil.create('div', 'legend' + (isMobile ? ' collapsed' : ''));
+
+                        // Create header with toggle button
+                        const header = L.DomUtil.create('div', 'legend-header', div);
+                        const title = L.DomUtil.create('h4', '', header);
+                        title.innerHTML = 'Voter Colors<br>(by Registered District)';
+                        const toggleBtn = L.DomUtil.create('button', 'legend-toggle', header);
+                        toggleBtn.innerHTML = isMobile ? '▼' : '▲';
+                        toggleBtn.setAttribute('aria-expanded', !isMobile);
+                        toggleBtn.setAttribute('aria-label', 'Toggle voter legend');
+
+                        // Create content wrapper
+                        const content = L.DomUtil.create('div', 'legend-content', div);
+
+                        // Get unique registered districts from voters
                         const registeredDistricts = new Set();
                         votersData.features.forEach(function(feature) {
                             if (feature.properties.county_commission_district) registeredDistricts.add(String(feature.properties.county_commission_district));
                         });
+
+                        // Sort districts
                         const sortedDistricts = Array.from(registeredDistricts).sort((a, b) => parseInt(a) - parseInt(b));
+
+                        // Add legend items (using innerHTML with properly escaped data)
                         sortedDistricts.forEach(function(district) {
-                            div.innerHTML += '<i class="circle" style="background:' + getVoterColor(district) + '"></i> District ' + escapeHtml(district) + '<br>';
+                            content.innerHTML += '<i class="circle" style="background:' + getVoterColor(district) + '"></i> District ' + escapeHtml(district) + '<br>';
                         });
+
+                        // Add toggle functionality
+                        header.onclick = function() {
+                            div.classList.toggle('collapsed');
+                            const isCollapsed = div.classList.contains('collapsed');
+                            toggleBtn.innerHTML = isCollapsed ? '▼' : '▲';
+                            toggleBtn.setAttribute('aria-expanded', !isCollapsed);
+                        };
+
                         return div;
                     };
                     voterLegend.addTo(map);
