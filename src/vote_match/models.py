@@ -3,7 +3,19 @@
 from typing import Optional
 
 from geoalchemy2 import Geometry
-from sqlalchemy import JSON, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -146,6 +158,12 @@ class Voter(Base):
 
     # PostGIS geometry column (populated from geocode lat/lon)
     geom = Column(Geometry("POINT", srid=4326), nullable=True)
+
+    # District comparison results (added by compare-districts command)
+    spatial_district_id = Column(String(10), nullable=True, index=True)
+    spatial_district_name = Column(String(100), nullable=True)
+    district_mismatch = Column(Boolean, nullable=True, index=True)
+    district_compared_at = Column(DateTime, nullable=True)
 
     # USPS validation result fields (added by USPS validator)
     usps_validation_status = Column(String, nullable=True, index=True)

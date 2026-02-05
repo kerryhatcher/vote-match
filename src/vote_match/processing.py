@@ -1016,7 +1016,13 @@ def compare_voter_districts(
             best_gr.service_name as geocode_service,
             best_gr.status as geocode_status,
             best_gr.match_confidence as geocode_confidence,
-            best_gr.matched_address as geocode_matched_address
+            best_gr.matched_address as geocode_matched_address,
+            v.birth_year,
+            v.race,
+            v.gender,
+            v.registration_date,
+            v.last_party_voted,
+            v.last_vote_date
         FROM voters v
         LEFT JOIN county_commission_districts d
             ON ST_Within(v.geom, d.geom)
@@ -1060,10 +1066,52 @@ def compare_voter_districts(
 
     for row in results:
         voter_id = row[0]
-        registered_district = row[1]
-        spatial_district = row[2]
-        spatial_district_name = row[3]
-        voter_location = row[4]
+        first_name = row[1]
+        last_name = row[2]
+        middle_name = row[3]
+        suffix = row[4]
+        street_number = row[5]
+        pre_direction = row[6]
+        street_name = row[7]
+        street_type = row[8]
+        post_direction = row[9]
+        apt_unit = row[10]
+        city = row[11]
+        zipcode = row[12]
+        registered_district = row[13]
+        spatial_district = row[14]
+        spatial_district_name = row[15]
+        voter_location = row[16]
+        geocode_service = row[17]
+        geocode_status = row[18]
+        geocode_confidence = row[19]
+        geocode_matched_address = row[20]
+        birth_year = row[21]
+        race = row[22]
+        gender = row[23]
+        registration_date = row[24]
+        last_party_voted = row[25]
+        last_vote_date = row[26]
+
+        # Build full address for convenience
+        address_parts = [
+            street_number,
+            pre_direction,
+            street_name,
+            street_type,
+            post_direction,
+        ]
+        full_address = " ".join(filter(None, address_parts))
+        if apt_unit:
+            full_address += f" {apt_unit}"
+        if city:
+            full_address += f", {city}"
+        if zipcode:
+            full_address += f" {zipcode}"
+
+        # Build full name for convenience
+        name_parts = [first_name, middle_name, last_name, suffix]
+        full_name = " ".join(filter(None, name_parts))
 
         # Skip if we couldn't determine spatial district
         if not spatial_district:
@@ -1076,7 +1124,7 @@ def compare_voter_districts(
             continue
 
         # Compare districts (normalize to handle different formats)
-        # Voter's county_precinct might be like "District 1" or "1"
+        # Voter's county_commission_district might be like "District 1" or "1"
         # District ID might be like "1" or "01"
         registered_normalized = (
             registered_district.replace("District", "").replace("district", "").strip()
@@ -1090,9 +1138,33 @@ def compare_voter_districts(
             mismatches.append(
                 {
                     "voter_id": voter_id,
+                    "full_name": full_name,
+                    "first_name": first_name or "",
+                    "last_name": last_name or "",
+                    "middle_name": middle_name or "",
+                    "suffix": suffix or "",
+                    "birth_year": birth_year or "",
+                    "race": race or "",
+                    "gender": gender or "",
+                    "registration_date": registration_date or "",
+                    "last_party_voted": last_party_voted or "",
+                    "last_vote_date": last_vote_date or "",
+                    "residence_full_address": full_address,
+                    "residence_street_number": street_number or "",
+                    "residence_pre_direction": pre_direction or "",
+                    "residence_street_name": street_name or "",
+                    "residence_street_type": street_type or "",
+                    "residence_post_direction": post_direction or "",
+                    "residence_apt_unit_number": apt_unit or "",
+                    "residence_city": city or "",
+                    "residence_zipcode": zipcode or "",
                     "registered_district": registered_district,
-                    "spatial_district": spatial_district,
+                    "expected_district": spatial_district,
                     "spatial_district_name": spatial_district_name,
+                    "geocode_service": geocode_service or "",
+                    "geocode_status": geocode_status or "",
+                    "geocode_confidence": geocode_confidence or "",
+                    "geocode_matched_address": geocode_matched_address or "",
                     "location": voter_location,
                 }
             )
@@ -1128,25 +1200,169 @@ def export_district_comparison(
 
     logger.info(f"Exporting {len(mismatches)} mismatches to {output_path}")
 
+    # Define field order for CSV (organized for elections board usability)
+    fieldnames = [
+        "voter_id",
+        "full_name",
+        "first_name",
+        "last_name",
+        "middle_name",
+        "suffix",
+        "birth_year",
+        "race",
+        "gender",
+        "registration_date",
+        "last_party_voted",
+        "last_vote_date",
+        "residence_full_address",
+        "residence_street_number",
+        "residence_pre_direction",
+        "residence_street_name",
+        "residence_street_type",
+        "residence_post_direction",
+        "residence_apt_unit_number",
+        "residence_city",
+        "residence_zipcode",
+        "registered_district",
+        "expected_district",
+        "spatial_district_name",
+        "geocode_service",
+        "geocode_status",
+        "geocode_confidence",
+        "geocode_matched_address",
+        "location",
+    ]
+
     with open(output_path, "w", newline="") as f:
-        if not mismatches:
-            # Write empty file with headers
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "voter_id",
-                    "registered_district",
-                    "spatial_district",
-                    "spatial_district_name",
-                    "location",
-                ],
-            )
-            writer.writeheader()
-            logger.info("No mismatches to export, wrote empty file with headers")
-            return
-
-        writer = csv.DictWriter(f, fieldnames=mismatches[0].keys())
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(mismatches)
 
-    logger.info(f"Export complete: {len(mismatches)} records written to {output_path}")
+        if mismatches:
+            writer.writerows(mismatches)
+            logger.info(f"Export complete: {len(mismatches)} records written to {output_path}")
+        else:
+            logger.info("No mismatches to export, wrote empty file with headers")
+
+
+def update_voter_district_comparison(
+    session: Session,
+    clear_existing: bool = True,
+    limit: int | None = None,
+) -> dict[str, int]:
+    """Update voters table with district comparison results.
+
+    Compares voter registration districts with spatially-determined districts
+    and updates the voters table with the results. This allows filtering
+    mismatched voters directly in QGIS without joins.
+
+    Args:
+        session: Database session
+        clear_existing: If True, clear previous comparison results before updating
+        limit: Optional limit on number of voters to process (for testing)
+
+    Returns:
+        Dictionary with statistics:
+        - total_compared: Total voters compared
+        - matched: Voters whose districts matched
+        - mismatched: Voters with district mismatches
+        - no_district: Voters with no district found
+        - records_updated: Total voter records updated
+        - records_cleared: Records cleared (if clear_existing=True)
+    """
+    from datetime import datetime
+
+    logger.info("Starting voter district comparison update")
+
+    stats = {
+        "total_compared": 0,
+        "matched": 0,
+        "mismatched": 0,
+        "no_district": 0,
+        "records_updated": 0,
+        "records_cleared": 0,
+    }
+
+    # Clear existing comparison results if requested
+    if clear_existing:
+        # Count voters with existing results
+        count = session.query(Voter).filter(Voter.district_compared_at.isnot(None)).count()
+
+        if count > 0:
+            logger.info(f"Clearing {count} existing comparison results...")
+            session.query(Voter).update(
+                {
+                    Voter.spatial_district_id: None,
+                    Voter.spatial_district_name: None,
+                    Voter.district_mismatch: None,
+                    Voter.district_compared_at: None,
+                }
+            )
+            session.commit()
+            stats["records_cleared"] = count
+
+    # Run district comparison
+    logger.info("Running district comparison...")
+    result = compare_voter_districts(session=session, limit=limit)
+
+    comparison_stats = result["stats"]
+
+    stats["total_compared"] = comparison_stats["total"]
+    stats["matched"] = comparison_stats["matched"]
+    stats["mismatched"] = comparison_stats["mismatched"]
+    stats["no_district"] = comparison_stats["no_district"]
+
+    # Build lookup of all comparison results
+    # We need to update ALL voters, not just mismatches
+    comparison_timestamp = datetime.now()
+
+    # Strategy: Use the raw SQL query results to update all voters
+    # This is more efficient than individual updates
+    from sqlalchemy import text
+
+    # Build update query that sets comparison results for all voters
+    update_query = text(
+        """
+        UPDATE voters v
+        SET
+            spatial_district_id = subq.spatial_district,
+            spatial_district_name = subq.spatial_district_name,
+            district_mismatch = subq.is_mismatch,
+            district_compared_at = :compared_at
+        FROM (
+            SELECT
+                v2.voter_registration_number,
+                d.district_id as spatial_district,
+                d.name as spatial_district_name,
+                CASE
+                    WHEN d.district_id IS NULL THEN NULL
+                    WHEN v2.county_commission_district IS NULL THEN NULL
+                    WHEN REPLACE(REPLACE(LOWER(v2.county_commission_district), 'district', ''), ' ', '')
+                         != LOWER(TRIM(d.district_id))
+                    THEN true
+                    ELSE false
+                END as is_mismatch
+            FROM voters v2
+            LEFT JOIN county_commission_districts d
+                ON ST_Within(v2.geom, d.geom)
+            WHERE v2.geom IS NOT NULL
+            """
+        + (f"LIMIT {limit}" if limit else "")
+        + """
+        ) subq
+        WHERE v.voter_registration_number = subq.voter_registration_number
+    """
+    )
+
+    logger.info("Updating voter records with comparison results...")
+    result_proxy = session.execute(update_query, {"compared_at": comparison_timestamp})
+    stats["records_updated"] = result_proxy.rowcount
+
+    session.commit()
+
+    logger.info(
+        f"District comparison update complete: {stats['records_updated']} voters updated, "
+        f"{stats['matched']} matched, {stats['mismatched']} mismatched, "
+        f"{stats['no_district']} no district found"
+    )
+
+    return stats

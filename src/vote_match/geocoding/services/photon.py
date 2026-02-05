@@ -261,13 +261,14 @@ class PhotonGeocoder(GeocodeService):
                 matched_address = ", ".join(address_parts) if address_parts else None
 
                 # Infer quality from OSM key (Photon doesn't provide confidence scores)
-                # OSM keys categorized by precision level:
-                # - addr: Specific address point
-                # - highway: Street-level match
-                # - building: Building footprint (specific but not address-level)
-                # - amenity/shop: Point of interest (restaurant, store, etc.)
-                # - place: City/neighborhood level
-                # - landuse: Land use area (park, forest, etc.)
+                # OSM keys categorized by precision level (from highest to lowest):
+                # - addr: Specific address point (0.9)
+                # - highway: Street-level match (0.7)
+                # - building: Building footprint (0.5)
+                # - amenity/shop/tourism/leisure/office/club: Point of interest (0.45)
+                # - place: City/neighborhood level (0.5)
+                # - landuse: Land use area (0.4)
+                # - boundary/waterway: Geographic features, very low precision (0.35)
                 osm_key = properties.get("osm_key", "").lower()
 
                 if osm_key == "addr":
@@ -282,8 +283,8 @@ class PhotonGeocoder(GeocodeService):
                     # Building footprint - specific but not address-level
                     status = GeocodeQuality.APPROXIMATE
                     match_confidence = 0.5
-                elif osm_key in ("amenity", "shop"):
-                    # POI (restaurant, store, etc.) - lower than building
+                elif osm_key in ("amenity", "shop", "tourism", "leisure", "office", "club"):
+                    # POI (restaurant, store, hotel, park, office, etc.)
                     status = GeocodeQuality.APPROXIMATE
                     match_confidence = 0.45
                 elif osm_key == "place":
@@ -291,9 +292,13 @@ class PhotonGeocoder(GeocodeService):
                     status = GeocodeQuality.APPROXIMATE
                     match_confidence = 0.5
                 elif osm_key == "landuse":
-                    # Land use area (park, forest) - lowest precision
+                    # Land use area (park, forest) - low precision
                     status = GeocodeQuality.APPROXIMATE
                     match_confidence = 0.4
+                elif osm_key in ("boundary", "waterway"):
+                    # Geographic features (admin boundaries, rivers) - very low precision
+                    status = GeocodeQuality.APPROXIMATE
+                    match_confidence = 0.35
                 else:
                     # Unknown OSM key - rare edge cases
                     logger.warning(

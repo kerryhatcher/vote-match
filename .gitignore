@@ -217,3 +217,5 @@ alembic/__pycache__/
 alembic/versions/__pycache__/
 ElectoralDistricts_-4642905017717519803.geojson
 .~lock.errors.csv#
+.~lock.mismatches.ods#
+mismatches.ods

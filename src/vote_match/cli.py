@@ -1763,6 +1763,11 @@ def compare_districts(
         "--export",
         help="Export mismatches to CSV file",
     ),
+    save_to_db: bool = typer.Option(
+        False,
+        "--save-to-db",
+        help="Save comparison results to voters table for QGIS filtering",
+    ),
     limit: int | None = typer.Option(
         None,
         "--limit",
@@ -1823,6 +1828,7 @@ def compare_districts(
                 from vote_match.processing import (
                     compare_voter_districts,
                     export_district_comparison,
+                    update_voter_district_comparison,
                 )
 
                 result = compare_voter_districts(session=session, limit=limit)
@@ -1865,6 +1871,26 @@ def compare_districts(
                     fg=typer.colors.GREEN,
                     bold=True,
                 )
+
+            # Save to database if requested
+            if save_to_db:
+                typer.echo()
+                typer.echo("Updating voters table with comparison results...")
+
+                update_stats = update_voter_district_comparison(
+                    session=session,
+                    clear_existing=True,
+                    limit=limit,
+                )
+
+                typer.secho(
+                    f"✓ Updated {update_stats['records_updated']} voter records "
+                    f"({update_stats['mismatched']} mismatches found)",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+
+                typer.echo("Filter in QGIS with: WHERE district_mismatch = true")
 
             # Summary message
             if mismatched > 0:
