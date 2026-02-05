@@ -1768,6 +1768,7 @@ def _export_leaflet(
             exact_match_only=exact_match_only,
             output_path=web_dir,
             html_filename=html_filename,
+            settings=settings,
         )
 
         progress.update(task, completed=True)

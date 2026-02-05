@@ -10,6 +10,14 @@
           integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
           crossorigin=""/>
 
+    <!-- Leaflet.markercluster CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"
+          integrity="sha256-zMzB74vAvvZKHwgS15vWPe4M4ewOe6vdkTlnxPTiR2w="
+          crossorigin=""/>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"
+          integrity="sha256-NJwl4ZMI0ZdgqD2ywWHA/RutX3JtiFgGQfkL61ZH/M0="
+          crossorigin=""/>
+
     <style>
         body {
             margin: 0;
@@ -150,18 +158,6 @@
             bottom: 10px;
         }
 
-        .map-title {
-            background: white;
-            background: rgba(255,255,255,0.95);
-            padding: 15px 30px;
-            border-radius: 5px;
-            box-shadow: 0 0 15px rgba(0,0,0,0.2);
-            font-size: 28px;
-            font-weight: bold;
-            color: #333;
-            text-align: center;
-        }
-
         .map-credit {
             background: white;
             background: rgba(255,255,255,0.95);
@@ -181,6 +177,35 @@
         .map-credit a:hover {
             text-decoration: underline;
         }
+
+        /* Spiderfy leg styling */
+        .leaflet-cluster-spider-leg {
+            stroke-width: 2;
+            stroke-opacity: 0.6;
+            fill: none;
+        }
+
+        /* Cluster icons */
+        .marker-cluster {
+            background-clip: padding-box;
+            border-radius: 50%;
+        }
+
+        .marker-cluster div {
+            width: 30px;
+            height: 30px;
+            margin-left: 5px;
+            margin-top: 5px;
+            text-align: center;
+            border-radius: 50%;
+            font: 12px "Helvetica Neue", Arial, Helvetica, sans-serif;
+            font-weight: bold;
+            color: white;
+        }
+
+        .marker-cluster span {
+            line-height: 30px;
+        }
     </style>
 </head>
 <body>
@@ -192,6 +217,11 @@
     <!-- Leaflet JavaScript -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
             integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+
+    <!-- Leaflet.markercluster JavaScript -->
+    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"
+            integrity="sha256-xKGN7GoB+5u0XIlhKLy6TTkakN8Vs9LwVKaO+Ny9yyo="
             crossorigin=""></script>
 
     <script>
@@ -293,6 +323,12 @@
                 } catch (e) { console.log('No districts data available'); }
                 const bounds = {{ bounds }};
 
+                // Configuration from server
+                const enableClustering = {{ enable_clustering }};
+                const clusterMaxZoom = {{ cluster_max_zoom }};
+                const spiderfyDistanceMultiplier = {{ spiderfy_distance_multiplier }};
+                const showCoverageOnHover = {{ show_coverage_on_hover }};
+
                 let districtLayer = null;
                 if (districtsData && districtsData.features && districtsData.features.length > 0) {
                     districtLayer = L.geoJSON(districtsData, {
@@ -305,12 +341,80 @@
 
                 let voterLayer = null;
                 if (votersData && votersData.features && votersData.features.length > 0) {
-                    voterLayer = L.geoJSON(votersData, {
-                        pointToLayer: function(feature, latlng) {
-                            return L.circleMarker(latlng, { radius: 12, fillColor: getVoterColor(feature.properties.county_commission_district), color: '#000', weight: 1, opacity: 1, fillOpacity: 0.7 });
-                        },
-                        onEachFeature: function(feature, layer) { layer.bindPopup(createVoterPopup(feature.properties)); }
-                    }).addTo(map);
+                    if (enableClustering) {
+                        // Create marker cluster group
+                        const markers = L.markerClusterGroup({
+                            maxClusterRadius: 80,
+                            spiderfyDistanceMultiplier: spiderfyDistanceMultiplier,
+                            showCoverageOnHover: showCoverageOnHover,
+                            zoomToBoundsOnClick: true,
+                            spiderfyOnMaxZoom: true,
+                            removeOutsideVisibleBounds: true,
+                            animate: true,
+                            animateAddingMarkers: false,
+                            disableClusteringAtZoom: clusterMaxZoom + 1,
+                            iconCreateFunction: function(cluster) {
+                                // Count markers by district in this cluster
+                                const childMarkers = cluster.getAllChildMarkers();
+                                const districtCounts = {};
+                                childMarkers.forEach(function(marker) {
+                                    const district = marker.feature.properties.county_commission_district;
+                                    districtCounts[district] = (districtCounts[district] || 0) + 1;
+                                });
+
+                                // Find predominant district
+                                let maxCount = 0;
+                                let predominantDistrict = null;
+                                for (const [district, count] of Object.entries(districtCounts)) {
+                                    if (count > maxCount) {
+                                        maxCount = count;
+                                        predominantDistrict = district;
+                                    }
+                                }
+
+                                const clusterColor = getVoterColor(predominantDistrict);
+                                const count = cluster.getChildCount();
+
+                                return L.divIcon({
+                                    html: '<div style="background-color:' + clusterColor + '"><span>' + count + '</span></div>',
+                                    className: 'marker-cluster',
+                                    iconSize: L.point(40, 40)
+                                });
+                            }
+                        });
+
+                        // Create GeoJSON layer and add to cluster group
+                        const geoJsonLayer = L.geoJSON(votersData, {
+                            pointToLayer: function(feature, latlng) {
+                                const district = feature.properties.county_commission_district;
+                                return L.circleMarker(latlng, {
+                                    radius: 12,
+                                    fillColor: getVoterColor(district),
+                                    color: '#000',
+                                    weight: 1,
+                                    opacity: 1,
+                                    fillOpacity: 0.7
+                                });
+                            },
+                            onEachFeature: function(feature, layer) {
+                                layer.bindPopup(createVoterPopup(feature.properties));
+                                // Store feature reference for cluster icon styling
+                                layer.feature = feature;
+                            }
+                        });
+
+                        markers.addLayer(geoJsonLayer);
+                        voterLayer = markers;
+                        voterLayer.addTo(map);
+                    } else {
+                        // Original non-clustered behavior
+                        voterLayer = L.geoJSON(votersData, {
+                            pointToLayer: function(feature, latlng) {
+                                return L.circleMarker(latlng, { radius: 12, fillColor: getVoterColor(feature.properties.county_commission_district), color: '#000', weight: 1, opacity: 1, fillOpacity: 0.7 });
+                            },
+                            onEachFeature: function(feature, layer) { layer.bindPopup(createVoterPopup(feature.properties)); }
+                        }).addTo(map);
+                    }
                 }
 
                 if (bounds && bounds.length === 2) map.fitBounds(bounds, { padding: [20, 20] });
@@ -331,15 +435,6 @@
                     this._div.innerHTML = html;
                 };
                 info.addTo(map);
-
-                // Add title control
-                const titleControl = L.control({ position: 'topcenter' });
-                titleControl.onAdd = function(map) {
-                    const div = L.DomUtil.create('div', 'map-title');
-                    div.textContent = '{{ title }}';
-                    return div;
-                };
-                titleControl.addTo(map);
 
                 // Add credit control
                 const creditControl = L.control({ position: 'bottomcenter' });

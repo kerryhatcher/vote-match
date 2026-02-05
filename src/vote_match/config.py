@@ -193,6 +193,22 @@ class Settings(BaseSettings):
         default="Voter Registration Map",
         description="Title to display at the top of generated Leaflet maps",
     )
+    map_enable_clustering: bool = Field(
+        default=True,
+        description="Enable marker clustering and spiderfying on Leaflet maps",
+    )
+    map_cluster_max_zoom: int = Field(
+        default=17,
+        description="Maximum zoom level for marker clustering (clusters disabled beyond this)",
+    )
+    map_spiderfy_distance_multiplier: float = Field(
+        default=1.0,
+        description="Multiplier for spiderfy leg length (1.0 = default, >1.0 = longer legs)",
+    )
+    map_cluster_show_coverage_on_hover: bool = Field(
+        default=True,
+        description="Show cluster coverage area on hover",
+    )
 
 
 def get_settings() -> Settings:

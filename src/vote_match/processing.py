@@ -1584,6 +1584,7 @@ def generate_leaflet_map(
     exact_match_only: bool = False,
     output_path: Path | None = None,
     html_filename: str = "index.html",
+    settings: Settings | None = None,
 ) -> str:
     """
     Generate an interactive Leaflet map with separate GeoJSON files.
@@ -1607,6 +1608,12 @@ def generate_leaflet_map(
     Returns:
         Path to the generated index.html file, or HTML string if output_path is None.
     """
+    # Get settings if not provided
+    if settings is None:
+        from vote_match.config import get_settings
+
+        settings = get_settings()
+
     logger.info(
         f"Generating Leaflet map: title='{title}', limit={limit}, include_districts={include_districts}, "
         f"mismatch_only={mismatch_only}, exact_match_only={exact_match_only}"
@@ -1663,6 +1670,15 @@ def generate_leaflet_map(
         # Replace template variables
         html = template_content.replace("{{ title }}", title)
         html = html.replace("{{ bounds }}", json.dumps(bounds))
+        # Clustering configuration
+        html = html.replace("{{ enable_clustering }}", str(settings.map_enable_clustering).lower())
+        html = html.replace("{{ cluster_max_zoom }}", str(settings.map_cluster_max_zoom))
+        html = html.replace(
+            "{{ spiderfy_distance_multiplier }}", str(settings.map_spiderfy_distance_multiplier)
+        )
+        html = html.replace(
+            "{{ show_coverage_on_hover }}", str(settings.map_cluster_show_coverage_on_hover).lower()
+        )
 
         # Update fetch URLs to use hashed filenames
         html = html.replace("fetch('voters.geojson')", f"fetch('{voters_filename}')")
@@ -1691,6 +1707,15 @@ def generate_leaflet_map(
         html = html.replace("{{ voters_geojson }}", json.dumps(voters_geojson))
         html = html.replace("{{ districts_geojson }}", json.dumps(districts_geojson))
         html = html.replace("{{ bounds }}", json.dumps(bounds))
+        # Clustering configuration
+        html = html.replace("{{ enable_clustering }}", str(settings.map_enable_clustering).lower())
+        html = html.replace("{{ cluster_max_zoom }}", str(settings.map_cluster_max_zoom))
+        html = html.replace(
+            "{{ spiderfy_distance_multiplier }}", str(settings.map_spiderfy_distance_multiplier)
+        )
+        html = html.replace(
+            "{{ show_coverage_on_hover }}", str(settings.map_cluster_show_coverage_on_hover).lower()
+        )
 
         logger.info("Leaflet map HTML generated successfully")
         return html
