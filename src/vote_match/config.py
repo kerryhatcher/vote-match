@@ -165,23 +165,23 @@ class Settings(BaseSettings):
     )
     r2_endpoint_url: str = Field(
         default="",
-        description="Cloudflare R2 endpoint URL (e.g., https://<account-id>.r2.cloudflarestorage.com)",
+        description="Cloudflare R2 endpoint URL (format: https://<account-id>.r2.cloudflarestorage.com)",
     )
     r2_access_key_id: str = Field(
         default="",
-        description="Cloudflare R2 access key ID",
+        description="R2 API Token Access Key ID (from R2 > Manage R2 API Tokens)",
     )
     r2_secret_access_key: str = Field(
         default="",
-        description="Cloudflare R2 secret access key",
+        description="R2 API Token Secret Access Key (from R2 > Manage R2 API Tokens)",
     )
     r2_bucket_name: str = Field(
         default="",
-        description="Cloudflare R2 bucket name for map uploads",
+        description="R2 bucket name for map uploads",
     )
     r2_public_url: str = Field(
         default="",
-        description="Public URL for accessing uploaded maps (e.g., https://maps.example.com)",
+        description="Public URL for accessing uploaded maps (custom domain or R2.dev subdomain)",
     )
 
 

@@ -18,7 +18,12 @@ def upload_to_r2(
     content_type: str = "text/html",
 ) -> str | None:
     """
-    Upload a file to Cloudflare R2 storage.
+    Upload a file to Cloudflare R2 storage using R2 API Token credentials.
+
+    R2 API Tokens generate S3-compatible Access Key ID and Secret Access Key pairs.
+    Create tokens at: Cloudflare Dashboard > R2 > Manage R2 API Tokens
+
+    Docs: https://developers.cloudflare.com/r2/api/tokens/
 
     Args:
         file_path: Local file path to upload.

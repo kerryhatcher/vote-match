@@ -1749,8 +1749,8 @@ def _export_leaflet(
         from vote_match.r2_storage import upload_to_r2 as r2_upload
 
         try:
-            # Use filename as the object key
-            object_key = output.name
+            # Use index.html as the object key for R2 (default web page)
+            object_key = "index.html"
 
             with Progress(
                 SpinnerColumn(),

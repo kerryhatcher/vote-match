@@ -1372,6 +1372,8 @@ def _get_voters_geojson(
     session: Session,
     limit: int | None = None,
     matched_only: bool = False,
+    mismatch_only: bool = False,
+    exact_match_only: bool = False,
 ) -> dict:
     """
     Query voters as GeoJSON using PostGIS ST_AsGeoJSON.
@@ -1380,6 +1382,8 @@ def _get_voters_geojson(
         session: SQLAlchemy session.
         limit: Maximum number of voters to include.
         matched_only: If True, only include voters with successful geocoding.
+        mismatch_only: If True, only include voters with district mismatches.
+        exact_match_only: If True, only include voters with exact geocode matches.
 
     Returns:
         GeoJSON FeatureCollection dict.
@@ -1412,6 +1416,12 @@ def _get_voters_geojson(
 
     if matched_only:
         query_sql += " AND geocode_status IN ('exact', 'interpolated', 'approximate')"
+
+    if mismatch_only:
+        query_sql += " AND district_mismatch = true"
+
+    if exact_match_only:
+        query_sql += " AND geocode_match_type = 'exact'"
 
     query_sql += " ORDER BY voter_registration_number"
 
@@ -1568,6 +1578,8 @@ def generate_leaflet_map(
     limit: int | None = None,
     include_districts: bool = False,
     matched_only: bool = False,
+    mismatch_only: bool = False,
+    exact_match_only: bool = False,
 ) -> str:
     """
     Generate an interactive Leaflet map as a self-contained HTML file.
@@ -1578,16 +1590,25 @@ def generate_leaflet_map(
         limit: Maximum number of voters to include.
         include_districts: Whether to include district boundary layer.
         matched_only: If True, only include voters with successful geocoding.
+        mismatch_only: If True, only include voters with district mismatches.
+        exact_match_only: If True, only include voters with exact geocode matches.
 
     Returns:
         Complete HTML string for the Leaflet map.
     """
     logger.info(
-        f"Generating Leaflet map: title='{title}', limit={limit}, include_districts={include_districts}"
+        f"Generating Leaflet map: title='{title}', limit={limit}, include_districts={include_districts}, "
+        f"mismatch_only={mismatch_only}, exact_match_only={exact_match_only}"
     )
 
     # Query data as GeoJSON
-    voters_geojson = _get_voters_geojson(session, limit=limit, matched_only=matched_only)
+    voters_geojson = _get_voters_geojson(
+        session,
+        limit=limit,
+        matched_only=matched_only,
+        mismatch_only=mismatch_only,
+        exact_match_only=exact_match_only,
+    )
 
     districts_geojson = {"type": "FeatureCollection", "features": []}
     if include_districts:
