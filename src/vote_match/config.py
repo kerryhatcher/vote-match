@@ -188,6 +188,12 @@ class Settings(BaseSettings):
         description="Optional folder path in R2 bucket for map uploads (e.g., '304urhg4ugh02u8hg430u8hg2439u84rgh')",
     )
 
+    # Map display configuration
+    map_title: str = Field(
+        default="Voter Registration Map",
+        description="Title to display at the top of generated Leaflet maps",
+    )
+
 
 def get_settings() -> Settings:
     """Get application settings instance."""

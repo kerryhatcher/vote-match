@@ -1479,10 +1479,10 @@ def export(
         "--include-districts",
         help="Include district boundaries (leaflet format only)",
     ),
-    title: str = typer.Option(
-        "Voter Registration Map",
+    title: str | None = typer.Option(
+        None,
         "--title",
-        help="Map title (leaflet format only)",
+        help="Map title (leaflet format only). If not specified, uses VOTE_MATCH_MAP_TITLE from .env",
     ),
     limit: int | None = typer.Option(
         None,
@@ -1539,10 +1539,13 @@ def export(
         try:
             # Handle leaflet format separately (uses different processing logic)
             if format == "leaflet":
+                # Use map title from settings if not provided via CLI
+                map_title = title if title is not None else settings.map_title
+
                 _export_leaflet(
                     session=session,
                     output=output,
-                    title=title,
+                    title=map_title,
                     limit=limit,
                     include_districts=include_districts,
                     matched_only=matched_only,
@@ -1786,8 +1789,6 @@ def _export_leaflet(
                 task = progress.add_task("Uploading to Cloudflare R2...", total=None)
 
                 # Upload all files in web directory
-                from pathlib import Path
-
                 web_dir = Path(index_path).parent
                 for file_path in web_dir.glob("*"):
                     if file_path.is_file():

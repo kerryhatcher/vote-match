@@ -137,6 +137,50 @@
             border-radius: 3px;
             color: #155724;
         }
+
+        .leaflet-top.leaflet-center {
+            left: 50%;
+            transform: translateX(-50%);
+            top: 10px;
+        }
+
+        .leaflet-bottom.leaflet-center {
+            left: 50%;
+            transform: translateX(-50%);
+            bottom: 10px;
+        }
+
+        .map-title {
+            background: white;
+            background: rgba(255,255,255,0.95);
+            padding: 15px 30px;
+            border-radius: 5px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            font-size: 28px;
+            font-weight: bold;
+            color: #333;
+            text-align: center;
+        }
+
+        .map-credit {
+            background: white;
+            background: rgba(255,255,255,0.95);
+            padding: 8px 15px;
+            border-radius: 5px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            font-size: 12px;
+            color: #666;
+            text-align: center;
+        }
+
+        .map-credit a {
+            color: #4169E1;
+            text-decoration: none;
+        }
+
+        .map-credit a:hover {
+            text-decoration: underline;
+        }
     </style>
 </head>
 <body>
@@ -161,17 +205,46 @@
             return div.innerHTML;
         }
 
-        // Color scheme for districts 1-9
-        const districtColors = {
-            '1': '#4169E1',  '2': '#FFD700',  '3': '#9370DB',  '4': '#FF6347',  '5': '#FF69B4',
-            '6': '#D2691E',  '7': '#228B22',  '8': '#8B4513',  '9': '#4682B4',
+        // Custom colors for voter markers (by registered district)
+        const voterColors = {
+            '1': '#377eb8',
+            '2': '#efa710',
+            '3': '#c6b0d8',
+            '4': '#f2c25a',
+            '5': '#e20000',
+            '6': '#f96060',
+            '7': '#8a664a',
+            '8': '#2d802f',
+            '9': '#930eb4',
         };
 
+        // Light pastel colors for district boundaries
+        const districtColors = {
+            '1': '#ADD8E6',  // Light blue
+            '2': '#F5DEB3',  // Light yellow/wheat
+            '3': '#E6D8F0',  // Light lavender
+            '4': '#FFDAB9',  // Light orange/peach
+            '5': '#FFB6C1',  // Light pink
+            '6': '#FFB6C1',  // Light pink (same as 5)
+            '7': '#D2B48C',  // Light brown/tan
+            '8': '#98FB98',  // Light green
+            '9': '#DDA0DD',  // Light purple/plum
+        };
+
+        function getVoterColor(district) {
+            return voterColors[String(district)] || '#999999';
+        }
+
         function getDistrictColor(district) {
-            return districtColors[String(district)] || '#999999';
+            return districtColors[String(district)] || '#CCCCCC';
         }
 
         const map = L.map('map');
+
+        // Create custom center positions for controls
+        map._controlCorners['topcenter'] = L.DomUtil.create('div', 'leaflet-top leaflet-center', map._controlContainer);
+        map._controlCorners['bottomcenter'] = L.DomUtil.create('div', 'leaflet-bottom leaflet-center', map._controlContainer);
+
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
             maxZoom: 19
@@ -180,9 +253,12 @@
         function createVoterPopup(properties) {
             const p = properties;
             let html = '<div class="popup-header">' + escapeHtml(p.full_name) + '</div>';
+            if (p.voter_registration_number) {
+                html += '<div class="popup-section"><span class="popup-label">Registration #:</span> ' + escapeHtml(p.voter_registration_number) + '<br></div>';
+            }
             html += '<div class="popup-section"><span class="popup-label">Address:</span> ' + escapeHtml(p.street_address) + '<br>';
             if (p.residence_city) html += escapeHtml(p.residence_city) + '<br>';
-            html += '</div><div class="popup-section"><span class="popup-label">Status:</span> ' + escapeHtml(p.status) + '<br></div>';
+            html += '</div>';
             html += '<div class="popup-section"><span class="popup-label">Registered District:</span> ' + escapeHtml(p.county_commission_district || 'Unknown') + '<br>';
             html += '<span class="popup-label">Spatial District:</span> ' + escapeHtml(p.spatial_district_id || 'Unknown') + '<br></div>';
             if (p.district_mismatch) {
@@ -202,13 +278,6 @@
             const p = properties;
             let html = '<div class="popup-header">District ' + escapeHtml(p.district_id) + '</div>';
             if (p.district_name) html += '<div class="popup-section">' + escapeHtml(p.district_name) + '<br></div>';
-            if (p.representative_name) {
-                html += '<div class="popup-section"><span class="popup-label">Representative:</span><br>' + escapeHtml(p.representative_name);
-                if (p.party) html += ' (' + escapeHtml(p.party) + ')';
-                html += '<br></div>';
-            }
-            if (p.contact_email) html += '<div class="popup-section"><span class="popup-label">Email:</span><br><a href="mailto:' + escapeHtml(p.contact_email) + '">' + escapeHtml(p.contact_email) + '</a><br></div>';
-            if (p.website) html += '<div class="popup-section"><span class="popup-label">Website:</span><br><a href="' + escapeHtml(p.website) + '" target="_blank">' + escapeHtml(p.website) + '</a><br></div>';
             if (p.voter_count !== null && p.voter_count !== undefined) html += '<div class="popup-section"><span class="popup-label">Voters in District:</span> ' + escapeHtml(p.voter_count) + '<br></div>';
             return html;
         }
@@ -228,7 +297,7 @@
                 if (districtsData && districtsData.features && districtsData.features.length > 0) {
                     districtLayer = L.geoJSON(districtsData, {
                         style: function(feature) {
-                            return { fillColor: getDistrictColor(feature.properties.district_id), weight: 2, opacity: 1, color: '#333', fillOpacity: 0.3 };
+                            return { fillColor: getDistrictColor(feature.properties.district_id), weight: 2, opacity: 1, color: '#333', fillOpacity: 0.5 };
                         },
                         onEachFeature: function(feature, layer) { layer.bindPopup(createDistrictPopup(feature.properties)); }
                     }).addTo(map);
@@ -238,7 +307,7 @@
                 if (votersData && votersData.features && votersData.features.length > 0) {
                     voterLayer = L.geoJSON(votersData, {
                         pointToLayer: function(feature, latlng) {
-                            return L.circleMarker(latlng, { radius: 6, fillColor: getDistrictColor(feature.properties.county_commission_district), color: '#000', weight: 1, opacity: 1, fillOpacity: 0.7 });
+                            return L.circleMarker(latlng, { radius: 12, fillColor: getVoterColor(feature.properties.county_commission_district), color: '#000', weight: 1, opacity: 1, fillOpacity: 0.7 });
                         },
                         onEachFeature: function(feature, layer) { layer.bindPopup(createVoterPopup(feature.properties)); }
                     }).addTo(map);
@@ -262,6 +331,30 @@
                     this._div.innerHTML = html;
                 };
                 info.addTo(map);
+
+                // Add title control
+                const titleControl = L.control({ position: 'topcenter' });
+                titleControl.onAdd = function(map) {
+                    const div = L.DomUtil.create('div', 'map-title');
+                    div.textContent = '{{ title }}';
+                    return div;
+                };
+                titleControl.addTo(map);
+
+                // Add credit control
+                const creditControl = L.control({ position: 'bottomcenter' });
+                creditControl.onAdd = function(map) {
+                    const div = L.DomUtil.create('div', 'map-credit');
+                    div.textContent = 'Created by ';
+                    const link = document.createElement('a');
+                    link.href = 'https://www.kerryhatcher.com';
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.textContent = 'Kerry Hatcher';
+                    div.appendChild(link);
+                    return div;
+                };
+                creditControl.addTo(map);
 
                 if (districtsData && districtsData.features && districtsData.features.length > 0) {
                     const districtLegend = L.control({ position: 'bottomright' });
@@ -292,7 +385,7 @@
                         });
                         const sortedDistricts = Array.from(registeredDistricts).sort((a, b) => parseInt(a) - parseInt(b));
                         sortedDistricts.forEach(function(district) {
-                            div.innerHTML += '<i class="circle" style="background:' + getDistrictColor(district) + '"></i> District ' + escapeHtml(district) + '<br>';
+                            div.innerHTML += '<i class="circle" style="background:' + getVoterColor(district) + '"></i> District ' + escapeHtml(district) + '<br>';
                         });
                         return div;
                     };

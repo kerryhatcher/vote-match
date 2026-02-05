@@ -262,3 +262,18 @@ Other geocoding services that could be added in the future:
 - OpenCage: <https://opencagedata.com/>
 - Geocode Maps: <https://geocode.maps.co/>
 - Gisgraphy: <https://www.gisgraphy.com/index.php>
+
+
+
+## Web Map
+Use the following colors: 
+
+1 #377eb8
+2 #efa710
+3 #c6b0d8
+4 #f2c25a
+5 #e20000
+6 #f96060
+7 #8a664a
+8 #2d802f
+9 #930eb4
