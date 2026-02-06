@@ -69,6 +69,24 @@
             margin: 5px 0;
         }
 
+        .info .credit {
+            font-size: 11px;
+            color: #666;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #ddd;
+            line-height: 1.4;
+        }
+
+        .info .credit a {
+            color: #4169E1;
+            text-decoration: none;
+        }
+
+        .info .credit a:hover {
+            text-decoration: underline;
+        }
+
         .legend {
             line-height: 22px;
             color: #555;
@@ -229,26 +247,6 @@
             left: 50%;
             transform: translateX(-50%);
             bottom: 10px;
-        }
-
-        .map-credit {
-            background: white;
-            background: rgba(255,255,255,0.95);
-            padding: 8px 15px;
-            border-radius: 5px;
-            box-shadow: 0 0 15px rgba(0,0,0,0.2);
-            font-size: 12px;
-            color: #666;
-            text-align: center;
-        }
-
-        .map-credit a {
-            color: #4169E1;
-            text-decoration: none;
-        }
-
-        .map-credit a:hover {
-            text-decoration: underline;
         }
 
         /* Spiderfy leg styling */
@@ -584,52 +582,17 @@
                     const districtCount = districtsData && districtsData.features ? districtsData.features.length : 0;
                     let html = '<h4>{{ title }}</h4><div class="count">' + voterCount.toLocaleString() + ' Voters</div>';
                     if (districtCount > 0) html += '<div>' + districtCount + ' Districts</div>';
+
+                    // Add credits
+                    html += '<div class="credit">';
+                    html += '© <a href="https://www.kerryhatcher.com" target="_blank" rel="noopener noreferrer">Kerry Hatcher</a><br>';
+                    html += 'Licensed under <a href="https://creativecommons.org/licenses/by-sa/4.0/deed.en" target="_blank" rel="noopener noreferrer">CC BY-SA 4.0</a><br>';
+                    html += 'Map tiles © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>';
+                    html += '</div>';
+
                     this._div.innerHTML = html;
                 };
                 info.addTo(map);
-
-                // Add credit control
-                const creditControl = L.control({ position: 'bottomcenter' });
-                creditControl.onAdd = function(map) {
-                    const div = L.DomUtil.create('div', 'map-credit');
-
-                    // Copyright notice
-                    const copyright = document.createElement('div');
-                    copyright.innerHTML = '© Data and map graphics licensed under ';
-                    const licenseLink = document.createElement('a');
-                    licenseLink.href = 'https://creativecommons.org/licenses/by-sa/4.0/deed.en';
-                    licenseLink.target = '_blank';
-                    licenseLink.rel = 'noopener noreferrer';
-                    licenseLink.textContent = 'CC BY-SA 4.0';
-                    copyright.appendChild(licenseLink);
-                    div.appendChild(copyright);
-
-                    // Creator credit
-                    const creator = document.createElement('div');
-                    creator.textContent = 'Created by ';
-                    const creatorLink = document.createElement('a');
-                    creatorLink.href = 'https://www.kerryhatcher.com';
-                    creatorLink.target = '_blank';
-                    creatorLink.rel = 'noopener noreferrer';
-                    creatorLink.textContent = 'Kerry Hatcher';
-                    creator.appendChild(creatorLink);
-                    div.appendChild(creator);
-
-                    // OpenStreetMap credit
-                    const osmCredit = document.createElement('div');
-                    osmCredit.innerHTML = 'Map tiles © ';
-                    const osmLink = document.createElement('a');
-                    osmLink.href = 'https://www.openstreetmap.org/copyright';
-                    osmLink.target = '_blank';
-                    osmLink.rel = 'noopener noreferrer';
-                    osmLink.textContent = 'OpenStreetMap';
-                    osmCredit.appendChild(osmLink);
-                    osmCredit.appendChild(document.createTextNode(' contributors'));
-                    div.appendChild(osmCredit);
-
-                    return div;
-                };
-                creditControl.addTo(map);
 
                 if (districtsData && districtsData.features && districtsData.features.length > 0) {
                     const districtLegend = L.control({ position: 'bottomright' });
