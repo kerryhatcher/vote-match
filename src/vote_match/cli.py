@@ -1494,11 +1494,16 @@ def export(
         "--upload-to-r2",
         help="Upload map to Cloudflare R2 (leaflet format only)",
     ),
+    redact_pii: bool = typer.Option(
+        False,
+        "--redact-pii",
+        help="Redact voter PII (name, address, registration number) from map. Only shows location, district, and data quality info.",
+    ),
 ) -> None:
     """Export voter records to CSV, GeoJSON, or interactive Leaflet map."""
     logger.info(
         "export command called with output: {}, format: {}, matched_only: {}, "
-        "mismatch_only: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, upload_to_r2: {}",
+        "mismatch_only: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, upload_to_r2: {}, redact_pii: {}",
         output,
         format,
         matched_only,
@@ -1508,6 +1513,7 @@ def export(
         title,
         limit,
         upload_to_r2,
+        redact_pii,
     )
 
     # Validate format
@@ -1553,6 +1559,7 @@ def export(
                     exact_match_only=exact_match_only,
                     settings=settings,
                     upload_to_r2=upload_to_r2,
+                    redact_pii=redact_pii,
                 )
                 return
 
@@ -1730,6 +1737,7 @@ def _export_leaflet(
     exact_match_only: bool,
     settings: Settings,
     upload_to_r2: bool = False,
+    redact_pii: bool = False,
 ) -> None:
     """
     Export voters to interactive Leaflet map HTML.
@@ -1745,6 +1753,7 @@ def _export_leaflet(
         exact_match_only: If True, only include voters with exact geocode matches
         settings: Application settings
         upload_to_r2: If True, upload the generated map to Cloudflare R2
+        redact_pii: If True, exclude PII fields from voter data
     """
     from vote_match.processing import generate_leaflet_map
 
@@ -1779,6 +1788,7 @@ def _export_leaflet(
             output_path=web_dir,
             html_filename=html_filename,
             settings=settings,
+            redact_pii=redact_pii,
         )
 
         progress.update(task, completed=True)

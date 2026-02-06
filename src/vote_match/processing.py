@@ -1376,6 +1376,7 @@ def _get_voters_geojson(
     matched_only: bool = False,
     mismatch_only: bool = False,
     exact_match_only: bool = False,
+    redact_pii: bool = False,
 ) -> dict:
     """
     Query voters as GeoJSON using PostGIS ST_AsGeoJSON.
@@ -1386,6 +1387,7 @@ def _get_voters_geojson(
         matched_only: If True, only include voters with successful geocoding.
         mismatch_only: If True, only include voters with district mismatches.
         exact_match_only: If True, only include voters with exact geocode matches.
+        redact_pii: If True, exclude PII fields (name, address, registration number).
 
     Returns:
         GeoJSON FeatureCollection dict.
@@ -1393,28 +1395,43 @@ def _get_voters_geojson(
     logger.info("Querying voters for GeoJSON export...")
 
     # Build query with PostGIS ST_AsGeoJSON for direct geometry conversion
-    query_sql = """
-        SELECT
-            voter_registration_number,
-            COALESCE(first_name || ' ' || last_name, 'Unknown') as full_name,
-            COALESCE(
-                residence_street_number || ' ' ||
-                COALESCE(residence_pre_direction || ' ', '') ||
-                residence_street_name || ' ' ||
-                COALESCE(residence_street_type, ''),
-                'Unknown'
-            ) as street_address,
-            residence_city,
-            status,
-            county_commission_district,
-            spatial_district_id,
-            district_mismatch,
-            geocode_status,
-            geocode_match_type,
-            ST_AsGeoJSON(geom)::json as geometry
-        FROM voters
-        WHERE geom IS NOT NULL
-    """
+    if redact_pii:
+        # Minimal query - no PII fields
+        query_sql = """
+            SELECT
+                county_commission_district,
+                spatial_district_id,
+                district_mismatch,
+                geocode_status,
+                geocode_match_type,
+                ST_AsGeoJSON(geom)::json as geometry
+            FROM voters
+            WHERE geom IS NOT NULL
+        """
+    else:
+        # Full query with PII
+        query_sql = """
+            SELECT
+                voter_registration_number,
+                COALESCE(first_name || ' ' || last_name, 'Unknown') as full_name,
+                COALESCE(
+                    residence_street_number || ' ' ||
+                    COALESCE(residence_pre_direction || ' ', '') ||
+                    residence_street_name || ' ' ||
+                    COALESCE(residence_street_type, ''),
+                    'Unknown'
+                ) as street_address,
+                residence_city,
+                status,
+                county_commission_district,
+                spatial_district_id,
+                district_mismatch,
+                geocode_status,
+                geocode_match_type,
+                ST_AsGeoJSON(geom)::json as geometry
+            FROM voters
+            WHERE geom IS NOT NULL
+        """
 
     if matched_only:
         query_sql += " AND geocode_status IN ('exact', 'interpolated', 'approximate')"
@@ -1436,22 +1453,37 @@ def _get_voters_geojson(
     # Build GeoJSON FeatureCollection
     features = []
     for row in rows:
-        feature = {
-            "type": "Feature",
-            "geometry": row.geometry,
-            "properties": {
-                "voter_registration_number": row.voter_registration_number,
-                "full_name": row.full_name,
-                "street_address": row.street_address,
-                "residence_city": row.residence_city,
-                "status": row.status,
-                "county_commission_district": row.county_commission_district,
-                "spatial_district_id": row.spatial_district_id,
-                "district_mismatch": row.district_mismatch,
-                "geocode_status": row.geocode_status,
-                "geocode_match_type": row.geocode_match_type,
-            },
-        }
+        if redact_pii:
+            # Privacy mode - minimal properties
+            feature = {
+                "type": "Feature",
+                "geometry": row.geometry,
+                "properties": {
+                    "county_commission_district": row.county_commission_district,
+                    "spatial_district_id": row.spatial_district_id,
+                    "district_mismatch": row.district_mismatch,
+                    "geocode_status": row.geocode_status,
+                    "geocode_match_type": row.geocode_match_type,
+                },
+            }
+        else:
+            # Full mode - all properties including PII
+            feature = {
+                "type": "Feature",
+                "geometry": row.geometry,
+                "properties": {
+                    "voter_registration_number": row.voter_registration_number,
+                    "full_name": row.full_name,
+                    "street_address": row.street_address,
+                    "residence_city": row.residence_city,
+                    "status": row.status,
+                    "county_commission_district": row.county_commission_district,
+                    "spatial_district_id": row.spatial_district_id,
+                    "district_mismatch": row.district_mismatch,
+                    "geocode_status": row.geocode_status,
+                    "geocode_match_type": row.geocode_match_type,
+                },
+            }
         features.append(feature)
 
     logger.info(f"Retrieved {len(features)} voters for GeoJSON export")
@@ -1627,6 +1659,7 @@ def generate_leaflet_map(
     output_path: Path | None = None,
     html_filename: str = "index.html",
     settings: Settings | None = None,
+    redact_pii: bool = False,
 ) -> str:
     """
     Generate an interactive Leaflet map with separate GeoJSON files.
@@ -1646,6 +1679,8 @@ def generate_leaflet_map(
         exact_match_only: If True, only include voters with exact geocode matches.
         output_path: Path to output directory. If None, returns HTML as string.
         html_filename: Name of the HTML file to create (default: index.html).
+        settings: Settings object (optional).
+        redact_pii: If True, exclude PII fields from voter data.
 
     Returns:
         Path to the generated index.html file, or HTML string if output_path is None.
@@ -1658,7 +1693,7 @@ def generate_leaflet_map(
 
     logger.info(
         f"Generating Leaflet map: title='{title}', limit={limit}, include_districts={include_districts}, "
-        f"mismatch_only={mismatch_only}, exact_match_only={exact_match_only}"
+        f"mismatch_only={mismatch_only}, exact_match_only={exact_match_only}, redact_pii={redact_pii}"
     )
 
     # Query data as GeoJSON
@@ -1668,6 +1703,7 @@ def generate_leaflet_map(
         matched_only=matched_only,
         mismatch_only=mismatch_only,
         exact_match_only=exact_match_only,
+        redact_pii=redact_pii,
     )
 
     districts_geojson = {"type": "FeatureCollection", "features": []}
@@ -1731,6 +1767,8 @@ def generate_leaflet_map(
         html = html.replace("{{ cluster_zoom_medium }}", str(settings.map_cluster_zoom_medium))
         html = html.replace("{{ cluster_radius_medium }}", str(settings.map_cluster_radius_medium))
         html = html.replace("{{ cluster_radius_close }}", str(settings.map_cluster_radius_close))
+        # Privacy settings
+        html = html.replace("{{ redact_pii }}", str(redact_pii).lower())
 
         # Update fetch URLs to use hashed filenames
         html = html.replace("fetch('voters.geojson')", f"fetch('{voters_filename}')")
@@ -1774,6 +1812,8 @@ def generate_leaflet_map(
         html = html.replace("{{ cluster_zoom_medium }}", str(settings.map_cluster_zoom_medium))
         html = html.replace("{{ cluster_radius_medium }}", str(settings.map_cluster_radius_medium))
         html = html.replace("{{ cluster_radius_close }}", str(settings.map_cluster_radius_close))
+        # Privacy settings
+        html = html.replace("{{ redact_pii }}", str(redact_pii).lower())
 
         logger.info("Leaflet map HTML generated successfully")
         return html

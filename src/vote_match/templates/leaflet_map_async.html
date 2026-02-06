@@ -333,6 +333,9 @@
             '9': '#DDA0DD',  // Light purple/plum
         };
 
+        // Privacy setting from server
+        const redactPii = {{ redact_pii }};
+
         function getVoterColor(district) {
             return voterColors[String(district)] || '#999999';
         }
@@ -354,26 +357,52 @@
 
         function createVoterPopup(properties) {
             const p = properties;
-            let html = '<div class="popup-header">' + escapeHtml(p.full_name) + '</div>';
-            if (p.voter_registration_number) {
-                html += '<div class="popup-section"><span class="popup-label">Registration #:</span> ' + escapeHtml(p.voter_registration_number) + '<br></div>';
-            }
-            html += '<div class="popup-section"><span class="popup-label">Address:</span> ' + escapeHtml(p.street_address) + '<br>';
-            if (p.residence_city) html += escapeHtml(p.residence_city) + '<br>';
-            html += '</div>';
-            html += '<div class="popup-section"><span class="popup-label">Registered District:</span> ' + escapeHtml(p.county_commission_district || 'Unknown') + '<br>';
-            html += '<span class="popup-label">Spatial District:</span> ' + escapeHtml(p.spatial_district_id || 'Unknown') + '<br></div>';
-            if (p.district_mismatch) {
-                html += '<div class="mismatch-warning">⚠️ <strong>District Mismatch!</strong><br>Voter is registered in District ' + escapeHtml(p.county_commission_district) + ' but located in District ' + escapeHtml(p.spatial_district_id) + '</div>';
-            } else if (p.spatial_district_id && p.county_commission_district) {
-                html += '<div class="match-ok">✓ Districts match</div>';
-            }
-            if (p.geocode_status) {
-                html += '<div class="popup-section"><span class="popup-label">Geocode Status:</span> ' + escapeHtml(p.geocode_status) + '<br>';
-                if (p.geocode_match_type) html += '<span class="popup-label">Match Type:</span> ' + escapeHtml(p.geocode_match_type) + '<br>';
+
+            if (redactPii) {
+                // Privacy mode: minimal popup with district and data quality info only
+                let html = '<div class="popup-header">Voter Location</div>';
+                html += '<div class="popup-section">';
+                html += '<span class="popup-label">Registered District:</span> ' + escapeHtml(p.county_commission_district || 'Unknown') + '<br>';
+                html += '<span class="popup-label">Spatial District:</span> ' + escapeHtml(p.spatial_district_id || 'Unknown') + '<br>';
                 html += '</div>';
+
+                if (p.district_mismatch) {
+                    html += '<div class="mismatch-warning">⚠️ <strong>District Mismatch!</strong><br>Registered in District ' + escapeHtml(p.county_commission_district) + ' but located in District ' + escapeHtml(p.spatial_district_id) + '</div>';
+                } else if (p.spatial_district_id && p.county_commission_district) {
+                    html += '<div class="match-ok">✓ Districts match</div>';
+                }
+
+                if (p.geocode_status) {
+                    html += '<div class="popup-section">';
+                    html += '<span class="popup-label">Geocode Quality:</span> ' + escapeHtml(p.geocode_status);
+                    if (p.geocode_match_type) html += ' (' + escapeHtml(p.geocode_match_type) + ')';
+                    html += '<br></div>';
+                }
+
+                return html;
+            } else {
+                // Original behavior: full voter details
+                let html = '<div class="popup-header">' + escapeHtml(p.full_name) + '</div>';
+                if (p.voter_registration_number) {
+                    html += '<div class="popup-section"><span class="popup-label">Registration #:</span> ' + escapeHtml(p.voter_registration_number) + '<br></div>';
+                }
+                html += '<div class="popup-section"><span class="popup-label">Address:</span> ' + escapeHtml(p.street_address) + '<br>';
+                if (p.residence_city) html += escapeHtml(p.residence_city) + '<br>';
+                html += '</div>';
+                html += '<div class="popup-section"><span class="popup-label">Registered District:</span> ' + escapeHtml(p.county_commission_district || 'Unknown') + '<br>';
+                html += '<span class="popup-label">Spatial District:</span> ' + escapeHtml(p.spatial_district_id || 'Unknown') + '<br></div>';
+                if (p.district_mismatch) {
+                    html += '<div class="mismatch-warning">⚠️ <strong>District Mismatch!</strong><br>Voter is registered in District ' + escapeHtml(p.county_commission_district) + ' but located in District ' + escapeHtml(p.spatial_district_id) + '</div>';
+                } else if (p.spatial_district_id && p.county_commission_district) {
+                    html += '<div class="match-ok">✓ Districts match</div>';
+                }
+                if (p.geocode_status) {
+                    html += '<div class="popup-section"><span class="popup-label">Geocode Status:</span> ' + escapeHtml(p.geocode_status) + '<br>';
+                    if (p.geocode_match_type) html += '<span class="popup-label">Match Type:</span> ' + escapeHtml(p.geocode_match_type) + '<br>';
+                    html += '</div>';
+                }
+                return html;
             }
-            return html;
         }
 
         function createDistrictPopup(properties) {
