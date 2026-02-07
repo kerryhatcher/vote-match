@@ -1499,11 +1499,17 @@ def export(
         "--redact-pii",
         help="Redact voter PII (name, address, registration number) from map. Only shows location, district, and data quality info.",
     ),
+    print_embed_code: bool = typer.Option(
+        False,
+        "--print-embed-code",
+        "--embed",
+        help="Print HTML iframe embed code after map generation (leaflet format only)",
+    ),
 ) -> None:
     """Export voter records to CSV, GeoJSON, or interactive Leaflet map."""
     logger.info(
         "export command called with output: {}, format: {}, matched_only: {}, "
-        "mismatch_only: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, upload_to_r2: {}, redact_pii: {}",
+        "mismatch_only: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, upload_to_r2: {}, redact_pii: {}, print_embed_code: {}",
         output,
         format,
         matched_only,
@@ -1514,6 +1520,7 @@ def export(
         limit,
         upload_to_r2,
         redact_pii,
+        print_embed_code,
     )
 
     # Validate format
@@ -1560,6 +1567,7 @@ def export(
                     settings=settings,
                     upload_to_r2=upload_to_r2,
                     redact_pii=redact_pii,
+                    print_embed_code=print_embed_code,
                 )
                 return
 
@@ -1726,6 +1734,40 @@ def _export_geojson(voters: list[Voter], output: Path) -> None:
     logger.info("GeoJSON export complete: {} features written to {}", len(features), output)
 
 
+def _generate_iframe_embed_code(
+    url: str,
+    title: str,
+    width: str = "100%",
+    height: str = "600px",
+) -> str:
+    """
+    Generate HTML iframe embed code for a map.
+
+    Args:
+        url: The URL to embed (R2 public URL or local file path)
+        title: Map title for iframe accessibility
+        width: CSS width value (default: "100%")
+        height: CSS height value (default: "600px")
+
+    Returns:
+        Formatted HTML iframe code ready for embedding
+    """
+    # Escape any quotes in the title for HTML attribute safety
+    safe_title = title.replace('"', "&quot;")
+
+    iframe_code = f"""<iframe
+  src="{url}"
+  title="{safe_title}"
+  width="{width}"
+  height="{height}"
+  style="border: 1px solid #ccc; border-radius: 4px;"
+  allowfullscreen
+  loading="lazy">
+</iframe>"""
+
+    return iframe_code
+
+
 def _export_leaflet(
     session: Session,
     output: Path,
@@ -1738,6 +1780,7 @@ def _export_leaflet(
     settings: Settings,
     upload_to_r2: bool = False,
     redact_pii: bool = False,
+    print_embed_code: bool = False,
 ) -> None:
     """
     Export voters to interactive Leaflet map HTML.
@@ -1754,6 +1797,7 @@ def _export_leaflet(
         settings: Application settings
         upload_to_r2: If True, upload the generated map to Cloudflare R2
         redact_pii: If True, exclude PII fields from voter data
+        print_embed_code: If True, print HTML iframe embed code after generation
     """
     from vote_match.processing import generate_leaflet_map
 
@@ -1871,6 +1915,47 @@ def _export_leaflet(
             f"   Open {index_path} in a web browser to view the map",
             fg=typer.colors.BLUE,
         )
+
+    # Print embed code if requested
+    if print_embed_code:
+        typer.secho("\n" + "=" * 70, fg=typer.colors.CYAN)
+        typer.secho("HTML Embed Code", fg=typer.colors.CYAN, bold=True)
+        typer.secho("=" * 70, fg=typer.colors.CYAN)
+
+        if r2_url:
+            # Use R2 public URL
+            embed_code = _generate_iframe_embed_code(url=r2_url, title=title)
+            typer.secho(
+                f"\nYour map is publicly accessible at: {r2_url}",
+                fg=typer.colors.GREEN,
+            )
+            typer.secho(
+                "\nCopy and paste this code to embed the map in your website:\n",
+                fg=typer.colors.BLUE,
+            )
+        else:
+            # Local file - provide instructions
+            embed_code = _generate_iframe_embed_code(url="YOUR_MAP_URL_HERE", title=title)
+            typer.secho(
+                "\nMap generated locally. To embed this map:",
+                fg=typer.colors.YELLOW,
+            )
+            typer.secho(
+                f"  1. Upload the contents of {Path(index_path).parent} to a web server",
+                fg=typer.colors.BLUE,
+            )
+            typer.secho(
+                f"  2. Replace 'YOUR_MAP_URL_HERE' with the public URL to {html_filename}",
+                fg=typer.colors.BLUE,
+            )
+            typer.secho(
+                "  3. Use the embed code below:\n",
+                fg=typer.colors.BLUE,
+            )
+
+        # Print embed code with high contrast for easy copying
+        typer.secho(embed_code, fg=typer.colors.WHITE, bg=typer.colors.BLACK)
+        typer.secho("\n" + "=" * 70 + "\n", fg=typer.colors.CYAN)
 
 
 @app.command()
