@@ -1828,6 +1828,148 @@ def generate_leaflet_map(
 # Generalized district boundary import / comparison
 # ---------------------------------------------------------------------------
 
+# Common property-name patterns for auto-detection of district ID and name
+_ID_CANDIDATES = [
+    "DISTRICTID",
+    "District",
+    "DISTRICT",
+    "district_id",
+    "DistrictID",
+    "ID",
+    "id",
+    "GEOID",
+    "CODE",
+    "DIST_NUM",
+    "DIST_NO",
+    "DIST",
+    "Dist",
+    "OBJECTID",
+]
+_NAME_CANDIDATES = [
+    "NAME",
+    "Name",
+    "name",
+    "NAMELSAD",
+    "DISTRICT_NAME",
+    "DistrictName",
+    "LABEL",
+    "Label",
+    "DESCRIP",
+    "Descrip",
+    "SHORTLABEL",
+    "ShortLabel",
+]
+
+
+def _read_boundary_features(file_path: Path) -> list[dict]:
+    """Read district boundary features from GeoJSON, shapefile, or zip archive.
+
+    Supports:
+    - .geojson / .json files (GeoJSON FeatureCollection)
+    - .shp files (ESRI Shapefile)
+    - .zip files containing shapefiles (auto-detects .shp inside)
+
+    All formats are normalized to a list of GeoJSON-style feature dicts with
+    ``properties`` (dict) and ``geometry`` (dict) keys.
+
+    Args:
+        file_path: Path to the boundary file
+
+    Returns:
+        List of feature dicts, each with ``properties`` and ``geometry``.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        ValueError: If the format is unsupported or contains no features
+    """
+    import geopandas as gpd
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    suffix = file_path.suffix.lower()
+
+    if suffix in (".geojson", ".json"):
+        # Pure GeoJSON path – load directly for full fidelity
+        with open(file_path) as f:
+            geojson_data = json.load(f)
+
+        if geojson_data.get("type") != "FeatureCollection":
+            raise ValueError(
+                f"Invalid GeoJSON: expected FeatureCollection, got {geojson_data.get('type')}"
+            )
+        features = geojson_data.get("features", [])
+        if not features:
+            raise ValueError("No features found in GeoJSON file")
+        logger.info(f"Read {len(features)} features from GeoJSON")
+        return features
+
+    if suffix == ".zip":
+        # Read shapefile inside the zip via geopandas
+        gdf = _read_shapefile_zip(file_path)
+    elif suffix == ".shp":
+        logger.info(f"Reading shapefile: {file_path}")
+        gdf = gpd.read_file(file_path)
+    else:
+        raise ValueError(
+            f"Unsupported file format '{suffix}'. Supported: .geojson, .json, .shp, .zip"
+        )
+
+    if gdf.empty:
+        raise ValueError("No features found in file")
+
+    # Reproject to EPSG:4326 (WGS84) if needed
+    if gdf.crs and gdf.crs.to_epsg() != 4326:
+        logger.info(f"Reprojecting from {gdf.crs} to EPSG:4326")
+        gdf = gdf.to_crs(epsg=4326)
+
+    # Convert to GeoJSON feature list
+    features = json.loads(gdf.to_json()).get("features", [])
+    logger.info(f"Read {len(features)} features from {suffix} file")
+    return features
+
+
+def _read_shapefile_zip(zip_path: Path):
+    """Read the first .shp file found inside a zip archive.
+
+    Args:
+        zip_path: Path to the .zip file
+
+    Returns:
+        GeoDataFrame
+
+    Raises:
+        ValueError: If no .shp file is found in the archive
+    """
+    import geopandas as gpd
+    import zipfile
+
+    logger.info(f"Scanning zip archive: {zip_path}")
+
+    with zipfile.ZipFile(zip_path) as zf:
+        shp_names = [n for n in zf.namelist() if n.lower().endswith(".shp")]
+
+    if not shp_names:
+        raise ValueError(f"No .shp file found inside {zip_path.name}")
+
+    # Use the first .shp found (most zip archives contain exactly one)
+    shp_name = shp_names[0]
+    logger.info(f"Found shapefile in zip: {shp_name}")
+
+    # geopandas can read directly from zip:// URI
+    uri = f"zip://{zip_path}!{shp_name}"
+    return gpd.read_file(uri)
+
+
+def _log_detected_properties(features: list[dict]) -> None:
+    """Log the property keys found in the first feature for debugging."""
+    if features:
+        props = features[0].get("properties", {})
+        logger.info(f"Available properties: {list(props.keys())}")
+        # Log first feature values for easier debugging
+        for k, v in props.items():
+            logger.debug(f"  {k} = {v!r}")
+
 
 def import_district_boundaries(
     session: Session,
@@ -1837,17 +1979,18 @@ def import_district_boundaries(
     id_property: str | None = None,
     name_property: str | None = None,
 ) -> dict[str, int]:
-    """Import district boundaries from a GeoJSON file for any district type.
+    """Import district boundaries from GeoJSON, shapefile, or zip for any district type.
+
+    Supports .geojson, .json, .shp, and .zip (containing shapefiles).
+    Shapefiles are automatically reprojected to EPSG:4326 if needed.
 
     Args:
         session: Database session
-        file_path: Path to GeoJSON FeatureCollection
+        file_path: Path to boundary file (.geojson, .shp, or .zip)
         district_type: Key from DISTRICT_TYPES (e.g., "congressional")
         clear_existing: Delete existing boundaries for this type first
-        id_property: GeoJSON property key for the district ID.
-                     Auto-detected from common patterns if not provided.
-        name_property: GeoJSON property key for the district name.
-                       Auto-detected from common patterns if not provided.
+        id_property: Property key for the district ID (auto-detected if omitted)
+        name_property: Property key for the district name (auto-detected if omitted)
 
     Returns:
         Dictionary with statistics: total, success, failed, skipped
@@ -1857,9 +2000,6 @@ def import_district_boundaries(
             f"Unknown district type '{district_type}'. "
             f"Valid types: {', '.join(sorted(DISTRICT_TYPES))}"
         )
-
-    if not file_path.exists():
-        raise FileNotFoundError(f"GeoJSON file not found: {file_path}")
 
     logger.info(f"Importing {district_type} boundaries from {file_path}")
 
@@ -1877,46 +2017,11 @@ def import_district_boundaries(
             ).delete()
             session.commit()
 
-    # Load GeoJSON
-    with open(file_path) as f:
-        geojson_data = json.load(f)
-
-    if geojson_data.get("type") != "FeatureCollection":
-        raise ValueError(
-            f"Invalid GeoJSON: expected FeatureCollection, got {geojson_data.get('type')}"
-        )
-
-    features = geojson_data.get("features", [])
-    if not features:
-        raise ValueError("No features found in GeoJSON")
+    # Read features from any supported format
+    features = _read_boundary_features(file_path)
+    _log_detected_properties(features)
 
     logger.info(f"Found {len(features)} features to import")
-
-    # Common property-name patterns for auto-detection
-    _id_candidates = [
-        "DISTRICTID",
-        "District",
-        "DISTRICT",
-        "district_id",
-        "DistrictID",
-        "ID",
-        "id",
-        "GEOID",
-        "NAMELSAD",
-        "CODE",
-        "DIST_NUM",
-        "DIST_NO",
-    ]
-    _name_candidates = [
-        "NAME",
-        "Name",
-        "name",
-        "NAMELSAD",
-        "DISTRICT_NAME",
-        "DistrictName",
-        "LABEL",
-        "Label",
-    ]
 
     stats: dict[str, int] = {"total": len(features), "success": 0, "failed": 0, "skipped": 0}
 
@@ -1935,7 +2040,7 @@ def import_district_boundaries(
             if id_property:
                 did = props.get(id_property)
             else:
-                for cand in _id_candidates:
+                for cand in _ID_CANDIDATES:
                     did = props.get(cand)
                     if did is not None:
                         break
@@ -1945,7 +2050,7 @@ def import_district_boundaries(
             if name_property:
                 dname = props.get(name_property)
             else:
-                for cand in _name_candidates:
+                for cand in _NAME_CANDIDATES:
                     dname = props.get(cand)
                     if dname is not None:
                         break
@@ -2005,8 +2110,8 @@ def import_district_boundaries(
                     "Photo_URL",
                     "photo_url",
                 }
-                | set(_id_candidates)
-                | set(_name_candidates)
+                | set(_ID_CANDIDATES)
+                | set(_NAME_CANDIDATES)
             )
             extra = {k: v for k, v in props.items() if k not in known_keys}
 
