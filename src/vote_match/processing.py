@@ -14,7 +14,12 @@ from sqlalchemy.orm import Session
 from vote_match.config import Settings
 from vote_match.geocoder import GeocodeResult, build_batch_csv, parse_response, submit_batch
 from vote_match.geocoding.base import GeocodeService, StandardGeocodeResult
-from vote_match.models import CountyCommissionDistrict
+from vote_match.models import (
+    DISTRICT_TYPES,
+    CountyCommissionDistrict,
+    DistrictBoundary,
+    VoterDistrictAssignment,
+)
 from vote_match.models import GeocodeResult as GeocodeResultModel
 from vote_match.models import Voter
 from vote_match.usps_validator import USPSValidationResult, validate_batch
@@ -1817,3 +1822,514 @@ def generate_leaflet_map(
 
         logger.info("Leaflet map HTML generated successfully")
         return html
+
+
+# ---------------------------------------------------------------------------
+# Generalized district boundary import / comparison
+# ---------------------------------------------------------------------------
+
+
+def import_district_boundaries(
+    session: Session,
+    file_path: Path,
+    district_type: str,
+    clear_existing: bool = False,
+    id_property: str | None = None,
+    name_property: str | None = None,
+) -> dict[str, int]:
+    """Import district boundaries from a GeoJSON file for any district type.
+
+    Args:
+        session: Database session
+        file_path: Path to GeoJSON FeatureCollection
+        district_type: Key from DISTRICT_TYPES (e.g., "congressional")
+        clear_existing: Delete existing boundaries for this type first
+        id_property: GeoJSON property key for the district ID.
+                     Auto-detected from common patterns if not provided.
+        name_property: GeoJSON property key for the district name.
+                       Auto-detected from common patterns if not provided.
+
+    Returns:
+        Dictionary with statistics: total, success, failed, skipped
+    """
+    if district_type not in DISTRICT_TYPES:
+        raise ValueError(
+            f"Unknown district type '{district_type}'. "
+            f"Valid types: {', '.join(sorted(DISTRICT_TYPES))}"
+        )
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"GeoJSON file not found: {file_path}")
+
+    logger.info(f"Importing {district_type} boundaries from {file_path}")
+
+    # Clear existing boundaries for this district type if requested
+    if clear_existing:
+        count = (
+            session.query(DistrictBoundary)
+            .filter(DistrictBoundary.district_type == district_type)
+            .count()
+        )
+        if count > 0:
+            logger.info(f"Clearing {count} existing {district_type} boundaries...")
+            session.query(DistrictBoundary).filter(
+                DistrictBoundary.district_type == district_type
+            ).delete()
+            session.commit()
+
+    # Load GeoJSON
+    with open(file_path) as f:
+        geojson_data = json.load(f)
+
+    if geojson_data.get("type") != "FeatureCollection":
+        raise ValueError(
+            f"Invalid GeoJSON: expected FeatureCollection, got {geojson_data.get('type')}"
+        )
+
+    features = geojson_data.get("features", [])
+    if not features:
+        raise ValueError("No features found in GeoJSON")
+
+    logger.info(f"Found {len(features)} features to import")
+
+    # Common property-name patterns for auto-detection
+    _id_candidates = [
+        "DISTRICTID",
+        "District",
+        "DISTRICT",
+        "district_id",
+        "DistrictID",
+        "ID",
+        "id",
+        "GEOID",
+        "NAMELSAD",
+        "CODE",
+        "DIST_NUM",
+        "DIST_NO",
+    ]
+    _name_candidates = [
+        "NAME",
+        "Name",
+        "name",
+        "NAMELSAD",
+        "DISTRICT_NAME",
+        "DistrictName",
+        "LABEL",
+        "Label",
+    ]
+
+    stats: dict[str, int] = {"total": len(features), "success": 0, "failed": 0, "skipped": 0}
+
+    for idx, feature in enumerate(features, 1):
+        try:
+            props = feature.get("properties", {})
+            geometry = feature.get("geometry")
+
+            if not geometry:
+                logger.warning(f"Feature {idx}: Missing geometry, skipping")
+                stats["skipped"] += 1
+                continue
+
+            # Resolve district_id
+            did = None
+            if id_property:
+                did = props.get(id_property)
+            else:
+                for cand in _id_candidates:
+                    did = props.get(cand)
+                    if did is not None:
+                        break
+
+            # Resolve name
+            dname = None
+            if name_property:
+                dname = props.get(name_property)
+            else:
+                for cand in _name_candidates:
+                    dname = props.get(cand)
+                    if dname is not None:
+                        break
+
+            if did is None:
+                logger.warning(f"Feature {idx}: Could not find district ID property, skipping")
+                stats["skipped"] += 1
+                continue
+
+            did = str(did).strip()
+            if not dname:
+                dname = f"{district_type} {did}"
+
+            # Check for duplicates
+            existing = (
+                session.query(DistrictBoundary)
+                .filter_by(district_type=district_type, district_id=did)
+                .first()
+            )
+            if existing:
+                logger.debug(f"District {district_type}/{did} already exists, skipping")
+                stats["skipped"] += 1
+                continue
+
+            # Convert GeoJSON geometry to PostGIS
+            shapely_geom = shape(geometry)
+            wkt = shapely_geom.wkt
+            geom = WKTElement(wkt, srid=4326)
+
+            # Collect optional representative metadata
+            rep_name = props.get("REPNAME1") or props.get("Commissioner") or props.get("rep_name")
+            party = props.get("PARTY1") or props.get("Party") or props.get("party")
+            email = props.get("Email") or props.get("E_Mail") or props.get("email")
+            website = (
+                props.get("DISTRICTURL1") or props.get("District_URL") or props.get("website_url")
+            )
+            photo = props.get("Photo") or props.get("Photo_URL") or props.get("photo_url")
+
+            # Store remaining properties as extra
+            known_keys = (
+                {
+                    id_property,
+                    name_property,
+                    "REPNAME1",
+                    "Commissioner",
+                    "rep_name",
+                    "PARTY1",
+                    "Party",
+                    "party",
+                    "Email",
+                    "E_Mail",
+                    "email",
+                    "DISTRICTURL1",
+                    "District_URL",
+                    "website_url",
+                    "Photo",
+                    "Photo_URL",
+                    "photo_url",
+                }
+                | set(_id_candidates)
+                | set(_name_candidates)
+            )
+            extra = {k: v for k, v in props.items() if k not in known_keys}
+
+            boundary = DistrictBoundary(
+                district_type=district_type,
+                district_id=did,
+                name=str(dname),
+                rep_name=rep_name,
+                party=party,
+                email=email,
+                website_url=website,
+                photo_url=photo,
+                extra_properties=extra if extra else None,
+                geom=geom,
+            )
+            session.add(boundary)
+            stats["success"] += 1
+
+            if stats["success"] % 100 == 0:
+                logger.info(f"Progress: {stats['success']}/{len(features)} boundaries imported...")
+
+        except Exception as e:
+            logger.warning(f"Feature {idx}: Failed to import - {e}")
+            stats["failed"] += 1
+
+    session.commit()
+
+    logger.info(
+        f"Import complete: {stats['success']} imported, "
+        f"{stats['skipped']} skipped, {stats['failed']} failed"
+    )
+    return stats
+
+
+def compare_all_districts(
+    session: Session,
+    district_types: list[str] | None = None,
+    limit: int | None = None,
+    save_to_db: bool = False,
+) -> dict[str, dict]:
+    """Compare voter registrations against spatial boundaries for multiple district types.
+
+    For each requested district type that has boundaries in the database, runs a
+    PostGIS spatial join to determine which boundary polygon contains each
+    voter's geocoded point, then compares against the voter-roll value.
+
+    Args:
+        session: Database session
+        district_types: List of district-type keys to compare.
+                        If None, compares all types that have boundaries.
+        limit: Optional limit on voters to process (for testing)
+        save_to_db: If True, persist results to voter_district_assignments
+
+    Returns:
+        Dict keyed by district_type with per-type stats:
+        {
+            "county_commission": {
+                "total": int, "matched": int, "mismatched": int,
+                "no_district": int, "no_registered": int
+            },
+            ...
+        }
+    """
+    from datetime import datetime
+
+    # Determine which types to compare based on available boundaries
+    available_stmt = session.query(DistrictBoundary.district_type).distinct().all()
+    available_types = {row[0] for row in available_stmt}
+
+    if not available_types:
+        logger.warning("No district boundaries found in database")
+        return {}
+
+    if district_types:
+        types_to_compare = [t for t in district_types if t in available_types]
+        missing = set(district_types) - available_types
+        if missing:
+            logger.warning(f"No boundaries found for: {', '.join(missing)}")
+    else:
+        types_to_compare = sorted(available_types)
+
+    if not types_to_compare:
+        logger.warning("No matching district types to compare")
+        return {}
+
+    logger.info(
+        f"Comparing {len(types_to_compare)} district type(s): {', '.join(types_to_compare)}"
+    )
+
+    results: dict[str, dict] = {}
+    comparison_time = datetime.now()
+
+    for dtype in types_to_compare:
+        voter_column = DISTRICT_TYPES[dtype]
+        logger.info(f"Comparing district type '{dtype}' (voter column: {voter_column})...")
+
+        # Spatial join query
+        query_sql = f"""
+            SELECT
+                v.voter_registration_number,
+                v.{voter_column} AS registered_value,
+                d.district_id AS spatial_district_id,
+                d.name AS spatial_district_name
+            FROM voters v
+            LEFT JOIN district_boundaries d
+                ON d.district_type = :district_type
+                AND ST_Within(v.geom, d.geom)
+            WHERE v.geom IS NOT NULL
+        """
+        if limit:
+            query_sql += f" LIMIT {limit}"
+
+        rows = session.execute(text(query_sql), {"district_type": dtype}).fetchall()
+
+        stats = {
+            "total": len(rows),
+            "matched": 0,
+            "mismatched": 0,
+            "no_district": 0,
+            "no_registered": 0,
+        }
+
+        assignments: list[dict] = []
+
+        for row in rows:
+            voter_id = row[0]
+            registered = row[1]
+            spatial_id = row[2]
+            spatial_name = row[3]
+
+            if not spatial_id:
+                stats["no_district"] += 1
+                if save_to_db:
+                    assignments.append(
+                        {
+                            "voter_id": voter_id,
+                            "district_type": dtype,
+                            "registered_value": registered,
+                            "spatial_district_id": None,
+                            "spatial_district_name": None,
+                            "is_mismatch": None,
+                            "compared_at": comparison_time,
+                        }
+                    )
+                continue
+
+            if not registered:
+                stats["no_registered"] += 1
+                if save_to_db:
+                    assignments.append(
+                        {
+                            "voter_id": voter_id,
+                            "district_type": dtype,
+                            "registered_value": None,
+                            "spatial_district_id": spatial_id,
+                            "spatial_district_name": spatial_name,
+                            "is_mismatch": None,
+                            "compared_at": comparison_time,
+                        }
+                    )
+                continue
+
+            # Normalize for comparison: strip "District" prefix, whitespace
+            reg_norm = registered.replace("District", "").replace("district", "").strip()
+            spat_norm = spatial_id.strip()
+
+            is_match = reg_norm == spat_norm
+            if is_match:
+                stats["matched"] += 1
+            else:
+                stats["mismatched"] += 1
+
+            if save_to_db:
+                assignments.append(
+                    {
+                        "voter_id": voter_id,
+                        "district_type": dtype,
+                        "registered_value": registered,
+                        "spatial_district_id": spatial_id,
+                        "spatial_district_name": spatial_name,
+                        "is_mismatch": not is_match,
+                        "compared_at": comparison_time,
+                    }
+                )
+
+        results[dtype] = stats
+
+        logger.info(
+            f"  {dtype}: {stats['matched']} matched, "
+            f"{stats['mismatched']} mismatched, "
+            f"{stats['no_district']} no boundary, "
+            f"{stats['no_registered']} no registration value"
+        )
+
+        # Persist results if requested
+        if save_to_db and assignments:
+            _save_district_assignments(session, dtype, assignments)
+
+    return results
+
+
+def _save_district_assignments(
+    session: Session,
+    district_type: str,
+    assignments: list[dict],
+) -> None:
+    """Upsert voter district assignment records for a single district type.
+
+    Args:
+        session: Database session
+        district_type: The district type being saved
+        assignments: List of assignment dicts
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    logger.info(f"Saving {len(assignments)} assignments for {district_type}...")
+
+    batch_size = 1000
+    for i in range(0, len(assignments), batch_size):
+        batch = assignments[i : i + batch_size]
+        stmt = pg_insert(VoterDistrictAssignment).values(batch)
+        stmt = stmt.on_conflict_on_constraint("uq_voter_district_type").do_update(
+            set_={
+                "registered_value": stmt.excluded.registered_value,
+                "spatial_district_id": stmt.excluded.spatial_district_id,
+                "spatial_district_name": stmt.excluded.spatial_district_name,
+                "is_mismatch": stmt.excluded.is_mismatch,
+                "compared_at": stmt.excluded.compared_at,
+            }
+        )
+        session.execute(stmt)
+
+    session.commit()
+    logger.info(f"Saved {len(assignments)} assignments for {district_type}")
+
+
+def get_district_status(session: Session) -> dict[str, dict]:
+    """Return summary statistics for imported boundaries and comparison results.
+
+    Returns:
+        Dict keyed by district_type, each containing:
+        {
+            "boundaries": int,         # number of imported boundaries
+            "voters_compared": int,     # voters with comparison results
+            "matched": int,
+            "mismatched": int,
+            "no_district": int,
+            "no_registered": int,
+        }
+    """
+    # Count boundaries per type
+    boundary_counts = (
+        session.query(
+            DistrictBoundary.district_type,
+            func.count().label("cnt"),
+        )
+        .group_by(DistrictBoundary.district_type)
+        .all()
+    )
+    boundary_map = {row[0]: row[1] for row in boundary_counts}
+
+    # Count assignment results per type
+    assignment_stats = (
+        session.query(
+            VoterDistrictAssignment.district_type,
+            func.count().label("total"),
+            func.sum(case((VoterDistrictAssignment.is_mismatch == False, 1), else_=0)).label(  # noqa: E712
+                "matched"
+            ),
+            func.sum(case((VoterDistrictAssignment.is_mismatch == True, 1), else_=0)).label(  # noqa: E712
+                "mismatched"
+            ),
+            func.sum(
+                case(
+                    (
+                        VoterDistrictAssignment.is_mismatch.is_(None)
+                        & VoterDistrictAssignment.spatial_district_id.is_(None),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("no_district"),
+            func.sum(
+                case(
+                    (
+                        VoterDistrictAssignment.is_mismatch.is_(None)
+                        & VoterDistrictAssignment.spatial_district_id.isnot(None),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("no_registered"),
+        )
+        .group_by(VoterDistrictAssignment.district_type)
+        .all()
+    )
+    assignment_map = {
+        row[0]: {
+            "voters_compared": row[1],
+            "matched": row[2] or 0,
+            "mismatched": row[3] or 0,
+            "no_district": row[4] or 0,
+            "no_registered": row[5] or 0,
+        }
+        for row in assignment_stats
+    }
+
+    # Merge
+    all_types = sorted(set(boundary_map.keys()) | set(assignment_map.keys()))
+    result = {}
+    for dtype in all_types:
+        result[dtype] = {
+            "boundaries": boundary_map.get(dtype, 0),
+            **assignment_map.get(
+                dtype,
+                {
+                    "voters_compared": 0,
+                    "matched": 0,
+                    "mismatched": 0,
+                    "no_district": 0,
+                    "no_registered": 0,
+                },
+            ),
+        }
+
+    return result
