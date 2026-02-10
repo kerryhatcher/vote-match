@@ -25,6 +25,46 @@ from vote_match.models import Voter
 from vote_match.usps_validator import USPSValidationResult, validate_batch
 
 
+def normalize_district_id(value: str | None) -> str | None:
+    """Normalize district ID for comparison by stripping leading zeros.
+
+    This ensures "026", "26", and "0026" are treated as equivalent values.
+    Preserves "0" for actual zero values.
+
+    Args:
+        value: District ID value (may be None or empty)
+
+    Returns:
+        Normalized district ID with leading zeros removed, or None if input is None/empty
+
+    Examples:
+        >>> normalize_district_id("026")
+        "26"
+        >>> normalize_district_id("0")
+        "0"
+        >>> normalize_district_id("000")
+        "0"
+        >>> normalize_district_id(None)
+        None
+        >>> normalize_district_id("")
+        None
+    """
+    if not value or not value.strip():
+        return None
+
+    # Strip whitespace
+    normalized = value.strip()
+
+    # If it's all digits, strip leading zeros but preserve "0"
+    if normalized.isdigit():
+        # lstrip("0") would turn "000" into "", so we handle that case
+        stripped = normalized.lstrip("0")
+        return stripped if stripped else "0"
+
+    # For non-numeric values (e.g., "District 5A"), return as-is
+    return normalized
+
+
 def get_pending_voters(
     session: Session,
     limit: int | None = None,
@@ -1382,9 +1422,15 @@ def _get_voters_geojson(
     mismatch_only: bool = False,
     exact_match_only: bool = False,
     redact_pii: bool = False,
+    district_type: list[str] | None = None,
+    county: str | None = None,
 ) -> dict:
     """
     Query voters as GeoJSON using PostGIS ST_AsGeoJSON.
+
+    Uses a two-phase approach:
+    1. Build SQLAlchemy query with JOINs and filters to get voter IDs
+    2. Use voter IDs in PostGIS query for efficient GeoJSON conversion
 
     Args:
         session: SQLAlchemy session.
@@ -1393,17 +1439,78 @@ def _get_voters_geojson(
         mismatch_only: If True, only include voters with district mismatches.
         exact_match_only: If True, only include voters with exact geocode matches.
         redact_pii: If True, exclude PII fields (name, address, registration number).
+        district_type: Filter by specific district type(s) when mismatch_only is True.
+        county: Filter by county name (normalized to uppercase).
 
     Returns:
         GeoJSON FeatureCollection dict.
     """
     logger.info("Querying voters for GeoJSON export...")
 
+    # Phase 1: Build SQLAlchemy query to filter voters
+    from vote_match.models import Voter, VoterDistrictAssignment
+    from sqlalchemy import select
+
+    query = select(Voter.voter_registration_number).filter(Voter.geom.isnot(None))
+
+    if matched_only:
+        query = query.filter(Voter.geocode_status.in_(["exact", "interpolated", "approximate"]))
+
+    if mismatch_only:
+        if district_type:
+            # Filter by specific district type(s) using JOIN
+            query = (
+                query.join(
+                    VoterDistrictAssignment,
+                    Voter.voter_registration_number == VoterDistrictAssignment.voter_id,
+                )
+                .filter(
+                    VoterDistrictAssignment.district_type.in_(district_type),
+                    VoterDistrictAssignment.is_mismatch,
+                )
+                .distinct()
+            )
+        else:
+            # No specific type: use legacy field (any mismatch)
+            query = query.filter(Voter.district_mismatch)
+
+    if exact_match_only:
+        query = query.filter(Voter.geocode_match_type == "exact")
+
+    if county:
+        # Normalize county name to uppercase for consistent matching
+        normalized_county = county.strip().upper()
+        query = query.filter(Voter.county == normalized_county)
+
+    if limit:
+        query = query.limit(limit)
+
+    # Execute query to get filtered voter IDs
+    result = session.execute(query)
+    voter_ids = [row[0] for row in result.fetchall()]
+
+    logger.info(f"Filtered to {len(voter_ids)} voters")
+
+    # If no voters match, return empty GeoJSON
+    if not voter_ids:
+        return {"type": "FeatureCollection", "features": []}
+
+    # Phase 2: Use voter IDs in PostGIS query for efficient GeoJSON conversion
+    # Determine which district field to select based on district_type parameter
+    # This is used for coloring voter markers on the map
+    if district_type and len(district_type) > 0:
+        # Use the first district type for coloring (maps typically show one district type)
+        district_column = DISTRICT_TYPES.get(district_type[0], "county_commission_district")
+    else:
+        # Default to county_commission_district for backward compatibility
+        district_column = "county_commission_district"
+
     # Build query with PostGIS ST_AsGeoJSON for direct geometry conversion
     if redact_pii:
         # Minimal query - no PII fields
-        query_sql = """
+        query_sql = f"""
             SELECT
+                {district_column} as registered_district,
                 county_commission_district,
                 spatial_district_id,
                 district_mismatch,
@@ -1411,11 +1518,12 @@ def _get_voters_geojson(
                 geocode_match_type,
                 ST_AsGeoJSON(geom)::json as geometry
             FROM voters
-            WHERE geom IS NOT NULL
+            WHERE voter_registration_number = ANY(:voter_ids)
+            ORDER BY voter_registration_number
         """
     else:
         # Full query with PII
-        query_sql = """
+        query_sql = f"""
             SELECT
                 voter_registration_number,
                 COALESCE(first_name || ' ' || last_name, 'Unknown') as full_name,
@@ -1428,6 +1536,7 @@ def _get_voters_geojson(
                 ) as street_address,
                 residence_city,
                 status,
+                {district_column} as registered_district,
                 county_commission_district,
                 spatial_district_id,
                 district_mismatch,
@@ -1435,24 +1544,11 @@ def _get_voters_geojson(
                 geocode_match_type,
                 ST_AsGeoJSON(geom)::json as geometry
             FROM voters
-            WHERE geom IS NOT NULL
+            WHERE voter_registration_number = ANY(:voter_ids)
+            ORDER BY voter_registration_number
         """
 
-    if matched_only:
-        query_sql += " AND geocode_status IN ('exact', 'interpolated', 'approximate')"
-
-    if mismatch_only:
-        query_sql += " AND district_mismatch = true"
-
-    if exact_match_only:
-        query_sql += " AND geocode_match_type = 'exact'"
-
-    query_sql += " ORDER BY voter_registration_number"
-
-    if limit:
-        query_sql += f" LIMIT {limit}"
-
-    result = session.execute(text(query_sql))
+    result = session.execute(text(query_sql), {"voter_ids": voter_ids})
     rows = result.fetchall()
 
     # Build GeoJSON FeatureCollection
@@ -1464,6 +1560,7 @@ def _get_voters_geojson(
                 "type": "Feature",
                 "geometry": row.geometry,
                 "properties": {
+                    "registered_district": row.registered_district,
                     "county_commission_district": row.county_commission_district,
                     "spatial_district_id": row.spatial_district_id,
                     "district_mismatch": row.district_mismatch,
@@ -1482,6 +1579,7 @@ def _get_voters_geojson(
                     "street_address": row.street_address,
                     "residence_city": row.residence_city,
                     "status": row.status,
+                    "registered_district": row.registered_district,
                     "county_commission_district": row.county_commission_district,
                     "spatial_district_id": row.spatial_district_id,
                     "district_mismatch": row.district_mismatch,
@@ -1504,6 +1602,7 @@ def _get_districts_geojson(
     district_type: str = "county_commission",
     mismatch_only: bool = False,
     exact_match_only: bool = False,
+    county: str | None = None,
 ) -> dict:
     """
     Query districts as GeoJSON for any district type using PostGIS ST_AsGeoJSON.
@@ -1513,6 +1612,8 @@ def _get_districts_geojson(
         district_type: District type key from DISTRICT_TYPES (e.g., 'state_senate', 'congressional')
         mismatch_only: If True, only count voters with district mismatches
         exact_match_only: If True, only count voters with exact geocode matches
+        county: Filter by county name (normalized to uppercase). Uses LIKE matching
+                for multi-county districts (e.g., "BIBB, MONROE").
 
     Returns:
         GeoJSON FeatureCollection dict with properties:
@@ -1540,6 +1641,14 @@ def _get_districts_geojson(
 
     filter_sql = " AND " + " AND ".join(filter_conditions) if filter_conditions else ""
 
+    # Build county filter clause conditionally
+    county_filter_sql = ""
+    params = {"district_type": district_type}
+    if county:
+        normalized_county = county.strip().upper()
+        county_filter_sql = " AND d.county_name LIKE :county_pattern"
+        params["county_pattern"] = f"%{normalized_county}%"
+
     # Build query using generic district_boundaries table and voter_district_assignments
     # voter_count: Total voters spatially located in this district
     # registered_elsewhere_count: Voters living here but registered elsewhere (mismatch = true)
@@ -1566,12 +1675,12 @@ def _get_districts_geojson(
             ON vda.district_type = :district_type
             AND vda.spatial_district_id = d.district_id
         LEFT JOIN voters v ON v.voter_registration_number = vda.voter_id AND v.geom IS NOT NULL
-        WHERE d.district_type = :district_type
+        WHERE d.district_type = :district_type{county_filter_sql}
         GROUP BY d.district_id, d.name, d.rep_name, d.party, d.email, d.website_url, d.geom
         ORDER BY d.district_id
     """
 
-    result = session.execute(text(query_sql), {"district_type": district_type})
+    result = session.execute(text(query_sql), params)
     rows = result.fetchall()
 
     # Build GeoJSON FeatureCollection
@@ -1668,6 +1777,7 @@ def generate_leaflet_map(
     settings: Settings | None = None,
     redact_pii: bool = False,
     district_type: str | None = None,
+    county: str | None = None,
 ) -> str:
     """
     Generate an interactive Leaflet map with separate GeoJSON files.
@@ -1691,6 +1801,7 @@ def generate_leaflet_map(
         redact_pii: If True, exclude PII fields from voter data.
         district_type: District type to display (e.g., 'state_senate', 'congressional').
                       Defaults to 'county_commission' if None.
+        county: Filter by county name (normalized to uppercase).
 
     Returns:
         Path to the generated index.html file, or HTML string if output_path is None.
@@ -1707,6 +1818,9 @@ def generate_leaflet_map(
     )
 
     # Query data as GeoJSON
+    # Convert single district_type to list for _get_voters_geojson
+    district_type_list = [district_type] if district_type else None
+
     voters_geojson = _get_voters_geojson(
         session,
         limit=limit,
@@ -1714,6 +1828,8 @@ def generate_leaflet_map(
         mismatch_only=mismatch_only,
         exact_match_only=exact_match_only,
         redact_pii=redact_pii,
+        district_type=district_type_list,
+        county=county,
     )
 
     districts_geojson = {"type": "FeatureCollection", "features": []}
@@ -1723,6 +1839,7 @@ def generate_leaflet_map(
             district_type=district_type or "county_commission",
             mismatch_only=mismatch_only,
             exact_match_only=exact_match_only,
+            county=county,
         )
 
     # Calculate map bounds
@@ -2304,9 +2421,11 @@ def compare_all_districts(
                     )
                 continue
 
-            # Normalize for comparison: strip "District" prefix, whitespace
-            reg_norm = registered.replace("District", "").replace("district", "").strip()
-            spat_norm = spatial_id.strip()
+            # Normalize for comparison: strip "District" prefix, whitespace, and leading zeros
+            reg_clean = registered.replace("District", "").replace("district", "").strip()
+            reg_norm = normalize_district_id(reg_clean)
+
+            spat_norm = normalize_district_id(spatial_id)
 
             is_match = reg_norm == spat_norm
             if is_match:

@@ -360,13 +360,13 @@
                 // Privacy mode: minimal popup with district and data quality info only
                 let html = '<div class="popup-header">Voter Location</div>';
                 html += '<div class="popup-section">';
-                html += '<span class="popup-label">Registered District:</span> ' + escapeHtml(p.county_commission_district || 'Unknown') + '<br>';
+                html += '<span class="popup-label">Registered District:</span> ' + escapeHtml(p.registered_district || 'Unknown') + '<br>';
                 html += '<span class="popup-label">Spatial District:</span> ' + escapeHtml(p.spatial_district_id || 'Unknown') + '<br>';
                 html += '</div>';
 
                 if (p.district_mismatch) {
-                    html += '<div class="mismatch-warning">⚠️ <strong>District Mismatch!</strong><br>Registered in District ' + escapeHtml(p.county_commission_district) + ' but located in District ' + escapeHtml(p.spatial_district_id) + '</div>';
-                } else if (p.spatial_district_id && p.county_commission_district) {
+                    html += '<div class="mismatch-warning">⚠️ <strong>District Mismatch!</strong><br>Registered in District ' + escapeHtml(p.registered_district) + ' but located in District ' + escapeHtml(p.spatial_district_id) + '</div>';
+                } else if (p.spatial_district_id && p.registered_district) {
                     html += '<div class="match-ok">✓ Districts match</div>';
                 }
 
@@ -387,11 +387,11 @@
                 html += '<div class="popup-section"><span class="popup-label">Address:</span> ' + escapeHtml(p.street_address) + '<br>';
                 if (p.residence_city) html += escapeHtml(p.residence_city) + '<br>';
                 html += '</div>';
-                html += '<div class="popup-section"><span class="popup-label">Registered District:</span> ' + escapeHtml(p.county_commission_district || 'Unknown') + '<br>';
+                html += '<div class="popup-section"><span class="popup-label">Registered District:</span> ' + escapeHtml(p.registered_district || 'Unknown') + '<br>';
                 html += '<span class="popup-label">Spatial District:</span> ' + escapeHtml(p.spatial_district_id || 'Unknown') + '<br></div>';
                 if (p.district_mismatch) {
-                    html += '<div class="mismatch-warning">⚠️ <strong>District Mismatch!</strong><br>Voter is registered in District ' + escapeHtml(p.county_commission_district) + ' but located in District ' + escapeHtml(p.spatial_district_id) + '</div>';
-                } else if (p.spatial_district_id && p.county_commission_district) {
+                    html += '<div class="mismatch-warning">⚠️ <strong>District Mismatch!</strong><br>Voter is registered in District ' + escapeHtml(p.registered_district) + ' but located in District ' + escapeHtml(p.spatial_district_id) + '</div>';
+                } else if (p.spatial_district_id && p.registered_district) {
                     html += '<div class="match-ok">✓ Districts match</div>';
                 }
                 if (p.geocode_status) {
@@ -454,7 +454,7 @@
                         // Extract unique districts from voter data
                         const districts = new Set();
                         votersData.features.forEach(function(feature) {
-                            const district = String(feature.properties.county_commission_district || 'unknown');
+                            const district = String(feature.properties.registered_district || 'unknown');
                             districts.add(district);
                         });
 
@@ -488,10 +488,10 @@
                             });
                         });
 
-                        // Group features by district
+                        // Group features by district (uses registered_district for map coloring)
                         const featuresByDistrict = {};
                         votersData.features.forEach(function(feature) {
-                            const district = String(feature.properties.county_commission_district || 'unknown');
+                            const district = String(feature.properties.registered_district || 'unknown');
                             if (!featuresByDistrict[district]) {
                                 featuresByDistrict[district] = [];
                             }
@@ -535,10 +535,10 @@
                         // Store reference for layer controls (voterLayer becomes object of layers)
                         voterLayer = districtLayers;
                     } else {
-                        // Original non-clustered behavior
+                        // Original non-clustered behavior (uses registered_district for map coloring)
                         voterLayer = L.geoJSON(votersData, {
                             pointToLayer: function(feature, latlng) {
-                                return L.circleMarker(latlng, { radius: 12, fillColor: getVoterColor(feature.properties.county_commission_district), color: '#000', weight: 1, opacity: 1, fillOpacity: 0.7 });
+                                return L.circleMarker(latlng, { radius: 12, fillColor: getVoterColor(feature.properties.registered_district), color: '#000', weight: 1, opacity: 1, fillOpacity: 0.7 });
                             },
                             onEachFeature: function(feature, layer) { layer.bindPopup(createVoterPopup(feature.properties)); }
                         }).addTo(map);
@@ -657,10 +657,10 @@
                         // Create content wrapper
                         const content = L.DomUtil.create('div', 'legend-content', div);
 
-                        // Get unique registered districts from voters
+                        // Get unique registered districts from voters (uses registered_district for map coloring)
                         const registeredDistricts = new Set();
                         votersData.features.forEach(function(feature) {
-                            if (feature.properties.county_commission_district) registeredDistricts.add(String(feature.properties.county_commission_district));
+                            if (feature.properties.registered_district) registeredDistricts.add(String(feature.properties.registered_district));
                         });
 
                         // Sort districts

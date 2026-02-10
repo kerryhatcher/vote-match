@@ -360,7 +360,7 @@
 
             // District information
             html += '<div class="popup-section">';
-            html += '<span class="popup-label">Registered District:</span> ' + escapeHtml(p.county_commission_district || 'Unknown') + '<br>';
+            html += '<span class="popup-label">Registered District:</span> ' + escapeHtml(p.registered_district || 'Unknown') + '<br>';
             html += '<span class="popup-label">Spatial District:</span> ' + escapeHtml(p.spatial_district_id || 'Unknown') + '<br>';
             html += '</div>';
 
@@ -368,10 +368,10 @@
             if (p.district_mismatch) {
                 html += '<div class="mismatch-warning">';
                 html += '⚠️ <strong>District Mismatch!</strong><br>';
-                html += 'Voter is registered in District ' + escapeHtml(p.county_commission_district);
+                html += 'Voter is registered in District ' + escapeHtml(p.registered_district);
                 html += ' but located in District ' + escapeHtml(p.spatial_district_id);
                 html += '</div>';
-            } else if (p.spatial_district_id && p.county_commission_district) {
+            } else if (p.spatial_district_id && p.registered_district) {
                 html += '<div class="match-ok">';
                 html += '✓ Districts match';
                 html += '</div>';
@@ -457,10 +457,10 @@
         let voterLayer = null;
         if (votersData && votersData.features && votersData.features.length > 0) {
             if (enableClustering) {
-                // Extract unique districts from voter data
+                // Extract unique districts from voter data (uses registered_district for map coloring)
                 const districts = new Set();
                 votersData.features.forEach(function(feature) {
-                    const district = String(feature.properties.county_commission_district || 'unknown');
+                    const district = String(feature.properties.registered_district || 'unknown');
                     districts.add(district);
                 });
 
@@ -494,10 +494,10 @@
                     });
                 });
 
-                // Group features by district
+                // Group features by district (uses registered_district for map coloring)
                 const featuresByDistrict = {};
                 votersData.features.forEach(function(feature) {
-                    const district = String(feature.properties.county_commission_district || 'unknown');
+                    const district = String(feature.properties.registered_district || 'unknown');
                     if (!featuresByDistrict[district]) {
                         featuresByDistrict[district] = [];
                     }
@@ -541,10 +541,10 @@
                 // Store reference for layer controls (voterLayer becomes object of layers)
                 voterLayer = districtLayers;
             } else {
-                // Original non-clustered behavior
+                // Original non-clustered behavior (uses registered_district for map coloring)
                 voterLayer = L.geoJSON(votersData, {
                     pointToLayer: function(feature, latlng) {
-                        const district = feature.properties.county_commission_district;
+                        const district = feature.properties.registered_district;
                         return L.circleMarker(latlng, {
                             radius: 12,
                             fillColor: getVoterColor(district),
@@ -735,10 +735,10 @@
                 // Create content wrapper
                 const content = L.DomUtil.create('div', 'legend-content', div);
 
-                // Get unique registered districts from voters
+                // Get unique registered districts from voters (uses registered_district for map coloring)
                 const registeredDistricts = new Set();
                 votersData.features.forEach(function(feature) {
-                    const district = feature.properties.county_commission_district;
+                    const district = feature.properties.registered_district;
                     if (district) {
                         registeredDistricts.add(String(district));
                     }

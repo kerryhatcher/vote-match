@@ -1620,6 +1620,7 @@ def export(
                     redact_pii=redact_pii,
                     print_embed_code=print_embed_code,
                     district_type=district_type,
+                    county=county,
                 )
                 return
 
@@ -1856,6 +1857,7 @@ def _export_leaflet(
     redact_pii: bool = False,
     print_embed_code: bool = False,
     district_type: list[str] | None = None,
+    county: str | None = None,
 ) -> None:
     """
     Export voters to interactive Leaflet map HTML.
@@ -1874,6 +1876,7 @@ def _export_leaflet(
         redact_pii: If True, exclude PII fields from voter data
         print_embed_code: If True, print HTML iframe embed code after generation
         district_type: List of district types to filter by (when mismatch_only is True)
+        county: Filter by county name (normalized to uppercase)
     """
     from vote_match.processing import generate_leaflet_map
 
@@ -1910,6 +1913,7 @@ def _export_leaflet(
             settings=settings,
             redact_pii=redact_pii,
             district_type=district_type[0] if district_type else None,
+            county=county,
         )
 
         progress.update(task, completed=True)
