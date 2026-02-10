@@ -39,6 +39,7 @@ DISTRICT_TYPES: dict[str, str] = {
     "super_commissioner": "super_commissioner_district",
     "super_school_board": "super_school_board_district",
     "fire": "fire_district",
+    "psc": "psc_district",
     "municipality": "municipality",
 }
 
@@ -139,6 +140,7 @@ class Voter(Base):
     super_commissioner_district = Column(String, nullable=True)
     super_school_board_district = Column(String, nullable=True)
     fire_district = Column(String, nullable=True)
+    psc_district = Column(String, nullable=True)
 
     # Municipality and Land Information
     municipality = Column(String, nullable=True)
