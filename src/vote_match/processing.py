@@ -1501,27 +1501,35 @@ def _get_voters_geojson(
 
 def _get_districts_geojson(
     session: Session,
+    district_type: str = "county_commission",
     mismatch_only: bool = False,
     exact_match_only: bool = False,
 ) -> dict:
     """
-    Query county commission districts as GeoJSON using PostGIS ST_AsGeoJSON.
+    Query districts as GeoJSON for any district type using PostGIS ST_AsGeoJSON.
 
     Args:
-        session: SQLAlchemy session.
-        mismatch_only: If True, only count mismatches for voters with district mismatches.
-        exact_match_only: If True, only count mismatches for voters with exact geocode matches.
+        session: SQLAlchemy session
+        district_type: District type key from DISTRICT_TYPES (e.g., 'state_senate', 'congressional')
+        mismatch_only: If True, only count voters with district mismatches
+        exact_match_only: If True, only count voters with exact geocode matches
 
     Returns:
         GeoJSON FeatureCollection dict with properties:
-            - voter_count: Total voters in district (unfiltered)
+            - voter_count: Total voters in district (by spatial join)
             - registered_elsewhere_count: Voters registered elsewhere but living here (filtered)
             - registered_here_elsewhere_count: Voters registered here but living elsewhere (filtered)
     """
+    from vote_match.models import DISTRICT_TYPES
+
     logger.info(
-        f"Querying districts for GeoJSON export (mismatch_only={mismatch_only}, "
-        f"exact_match_only={exact_match_only})..."
+        f"Querying {district_type} districts for GeoJSON export "
+        f"(mismatch_only={mismatch_only}, exact_match_only={exact_match_only})..."
     )
+
+    # Validate district type
+    if district_type not in DISTRICT_TYPES:
+        raise ValueError(f"Invalid district_type: {district_type}")
 
     # Build filter condition for mismatch counts
     filter_conditions = []
@@ -1532,9 +1540,10 @@ def _get_districts_geojson(
 
     filter_sql = " AND " + " AND ".join(filter_conditions) if filter_conditions else ""
 
-    # Build query with PostGIS ST_AsGeoJSON and voter counts
-    # voter_count: Unfiltered count of all voters in district
-    # registered_elsewhere_count & registered_here_elsewhere_count: Filtered by mismatch_only/exact_match_only
+    # Build query using generic district_boundaries table and voter_district_assignments
+    # voter_count: Total voters spatially located in this district
+    # registered_elsewhere_count: Voters living here but registered elsewhere (mismatch = true)
+    # registered_here_elsewhere_count: Voters registered here but living elsewhere
     query_sql = f"""
         SELECT
             d.district_id,
@@ -1544,32 +1553,30 @@ def _get_districts_geojson(
             d.email as contact_email,
             d.district_url as website,
             ST_AsGeoJSON(d.geom)::json as geometry,
-            COUNT(CASE WHEN v.spatial_district_id = d.district_id THEN 1 END) as voter_count,
+            COUNT(CASE WHEN vda.spatial_district_id = d.district_id THEN 1 END) as voter_count,
             COUNT(CASE
-                WHEN v.spatial_district_id = d.district_id
-                    AND v.county_commission_district IS NOT NULL
-                    AND REPLACE(REPLACE(LOWER(v.county_commission_district), 'district', ''), ' ', '') != LOWER(TRIM(d.district_id))
+                WHEN vda.spatial_district_id = d.district_id
+                    AND vda.is_mismatch = true
                     {filter_sql}
                 THEN 1
             END) as registered_elsewhere_count,
             COUNT(CASE
-                WHEN v.county_commission_district IS NOT NULL
-                    AND REPLACE(REPLACE(LOWER(v.county_commission_district), 'district', ''), ' ', '') = LOWER(TRIM(d.district_id))
-                    AND (v.spatial_district_id IS NULL OR v.spatial_district_id != d.district_id)
+                WHEN vda.registered_value IS NOT NULL
+                    AND (vda.spatial_district_id IS NULL OR vda.spatial_district_id != d.district_id)
                     {filter_sql}
                 THEN 1
             END) as registered_here_elsewhere_count
-        FROM county_commission_districts d
-        LEFT JOIN voters v ON (v.spatial_district_id = d.district_id OR (
-            v.county_commission_district IS NOT NULL
-            AND REPLACE(REPLACE(LOWER(v.county_commission_district), 'district', ''), ' ', '') = LOWER(TRIM(d.district_id))
-        )) AND v.geom IS NOT NULL
-        GROUP BY d.district_id, d.name, d.rep_name, d.party,
-                 d.email, d.district_url, d.geom
+        FROM district_boundaries d
+        LEFT JOIN voter_district_assignments vda
+            ON vda.district_type = :district_type
+            AND (vda.spatial_district_id = d.district_id OR vda.registered_value IS NOT NULL)
+        LEFT JOIN voters v ON v.voter_registration_number = vda.voter_id AND v.geom IS NOT NULL
+        WHERE d.district_type = :district_type
+        GROUP BY d.district_id, d.name, d.rep_name, d.party, d.email, d.district_url, d.geom
         ORDER BY d.district_id
     """
 
-    result = session.execute(text(query_sql))
+    result = session.execute(text(query_sql), {"district_type": district_type})
     rows = result.fetchall()
 
     # Build GeoJSON FeatureCollection
@@ -1665,6 +1672,7 @@ def generate_leaflet_map(
     html_filename: str = "index.html",
     settings: Settings | None = None,
     redact_pii: bool = False,
+    district_type: str | None = None,
 ) -> str:
     """
     Generate an interactive Leaflet map with separate GeoJSON files.
@@ -1686,6 +1694,8 @@ def generate_leaflet_map(
         html_filename: Name of the HTML file to create (default: index.html).
         settings: Settings object (optional).
         redact_pii: If True, exclude PII fields from voter data.
+        district_type: District type to display (e.g., 'state_senate', 'congressional').
+                      Defaults to 'county_commission' if None.
 
     Returns:
         Path to the generated index.html file, or HTML string if output_path is None.
@@ -1715,6 +1725,7 @@ def generate_leaflet_map(
     if include_districts:
         districts_geojson = _get_districts_geojson(
             session,
+            district_type=district_type or "county_commission",
             mismatch_only=mismatch_only,
             exact_match_only=exact_match_only,
         )

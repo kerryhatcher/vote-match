@@ -1507,6 +1507,12 @@ def export(
         "--mismatch-only",
         help="Export only voters with district mismatches",
     ),
+    district_type: list[str] | None = typer.Option(
+        None,
+        "--district-type",
+        "-dt",
+        help="Filter by specific district type(s) when using --mismatch-only. Can be repeated. Examples: state_senate, congressional, county_commission",
+    ),
     exact_match_only: bool = typer.Option(
         False,
         "--exact-match-only",
@@ -1552,11 +1558,12 @@ def export(
     """Export voter records to CSV, GeoJSON, or interactive Leaflet map."""
     logger.info(
         "export command called with output: {}, format: {}, matched_only: {}, "
-        "mismatch_only: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, county: {}, upload_to_r2: {}, redact_pii: {}, print_embed_code: {}",
+        "mismatch_only: {}, district_type: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, county: {}, upload_to_r2: {}, redact_pii: {}, print_embed_code: {}",
         output,
         format,
         matched_only,
         mismatch_only,
+        district_type,
         exact_match_only,
         include_districts,
         title,
@@ -1612,6 +1619,7 @@ def export(
                     upload_to_r2=upload_to_r2,
                     redact_pii=redact_pii,
                     print_embed_code=print_embed_code,
+                    district_type=district_type,
                 )
                 return
 
@@ -1628,7 +1636,24 @@ def export(
                 )
 
             if mismatch_only:
-                query = query.filter(Voter.district_mismatch)
+                if district_type:
+                    # Filter by specific district type(s) using JOIN
+                    from vote_match.models import VoterDistrictAssignment
+
+                    query = (
+                        query.join(
+                            VoterDistrictAssignment,
+                            Voter.voter_registration_number == VoterDistrictAssignment.voter_id,
+                        )
+                        .filter(
+                            VoterDistrictAssignment.district_type.in_(district_type),
+                            VoterDistrictAssignment.is_mismatch,
+                        )
+                        .distinct()
+                    )  # Avoid duplicates if multiple district types
+                else:
+                    # No specific type: use legacy field (any mismatch)
+                    query = query.filter(Voter.district_mismatch)
 
             if exact_match_only:
                 query = query.filter(Voter.geocode_match_type == "exact")
@@ -1830,6 +1855,7 @@ def _export_leaflet(
     upload_to_r2: bool = False,
     redact_pii: bool = False,
     print_embed_code: bool = False,
+    district_type: list[str] | None = None,
 ) -> None:
     """
     Export voters to interactive Leaflet map HTML.
@@ -1847,6 +1873,7 @@ def _export_leaflet(
         upload_to_r2: If True, upload the generated map to Cloudflare R2
         redact_pii: If True, exclude PII fields from voter data
         print_embed_code: If True, print HTML iframe embed code after generation
+        district_type: List of district types to filter by (when mismatch_only is True)
     """
     from vote_match.processing import generate_leaflet_map
 
@@ -1882,6 +1909,7 @@ def _export_leaflet(
             html_filename=html_filename,
             settings=settings,
             redact_pii=redact_pii,
+            district_type=district_type[0] if district_type else None,
         )
 
         progress.update(task, completed=True)
@@ -3051,6 +3079,13 @@ def compare_districts(
                     f"✓ All voters are in their registered districts across {len(results)} type(s)",
                     fg=typer.colors.GREEN,
                     bold=True,
+                )
+
+            # Confirm legacy field sync if results were saved
+            if save_to_db:
+                typer.secho(
+                    "✓ Updated legacy district_mismatch field for backward compatibility",
+                    fg=typer.colors.GREEN,
                 )
 
             if save_to_db:

@@ -240,9 +240,83 @@ vote-match compare-districts --district-type congressional --save-to-db
 
 # Compare multiple district types
 vote-match compare-districts --district-type congressional --district-type state_senate --save-to-db
+```
 
-# Export comparison results
-vote-match compare-districts --district-type congressional --export mismatches.csv
+**Note:** When using `--save-to-db`, the legacy `district_mismatch` field is automatically updated for backward compatibility with existing QGIS projects.
+
+### Export with District Type Filtering
+
+Export voters with mismatches for specific district type(s):
+
+```bash
+# Export state senate mismatches to CSV
+vote-match export bibb-senate-mismatches.csv \
+  --county BIBB \
+  --mismatch-only \
+  --district-type state_senate
+
+# Export to interactive web map with correct district boundaries
+vote-match export bibb-senate-map.html \
+  --format leaflet \
+  --county BIBB \
+  --mismatch-only \
+  --district-type state_senate \
+  --include-districts \
+  --redact-pii
+
+# Multiple district types (voters mismatched in EITHER type)
+vote-match export mismatches.csv \
+  --mismatch-only \
+  --district-type state_senate \
+  --district-type congressional
+
+# Export all mismatches (any district type)
+vote-match export all-mismatches.csv \
+  --mismatch-only
+```
+
+**Key features:**
+
+- `--district-type` filters by specific district type(s) when using `--mismatch-only`
+- Without `--district-type`, uses legacy `district_mismatch` field (any mismatch)
+- Leaflet maps show correct district boundaries for the specified type
+- Can be combined with `--county` for geographic filtering
+
+### QGIS Filtering by District Type
+
+To filter voters by specific district type mismatches in QGIS:
+
+#### Option 1: Simple (any mismatch)
+
+```sql
+"district_mismatch" = true
+```
+
+#### Option 2: Specific district type (requires JOIN)
+
+Since `VoterDistrictAssignment` tracks per-district-type mismatches, you can create a QGIS relationship:
+
+1. Add both `voters` and `voter_district_assignments` layers to QGIS
+2. Create a relationship: `voters.voter_registration_number` → `voter_district_assignments.voter_id`
+3. Filter voters layer:
+
+   ```sql
+   "voter_registration_number" IN (
+     SELECT voter_id FROM voter_district_assignments
+     WHERE district_type = 'state_senate' AND is_mismatch = true
+   )
+   ```
+
+#### Option 3: Export filtered data
+
+For simpler QGIS workflows, export filtered data directly:
+
+```bash
+vote-match export qgis-senate-mismatches.geojson \
+  --format geojson \
+  --mismatch-only \
+  --district-type state_senate \
+  --county BIBB
 ```
 
 ### County-Based Filtering
