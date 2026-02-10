@@ -1506,49 +1506,77 @@ def _get_voters_geojson(
         district_column = "county_commission_district"
 
     # Build query with PostGIS ST_AsGeoJSON for direct geometry conversion
+    # When district_type is specified, JOIN voter_district_assignments to get the
+    # correct per-type spatial_district_id and is_mismatch instead of legacy voter columns
+    use_vda_join = bool(district_type and len(district_type) > 0)
+
+    if use_vda_join:
+        vda_join = """
+            LEFT JOIN voter_district_assignments vda
+                ON vda.voter_id = v.voter_registration_number
+                AND vda.district_type = :district_type"""
+        spatial_col = "vda.spatial_district_id"
+        mismatch_col = "vda.is_mismatch as district_mismatch"
+        from_clause = "FROM voters v"
+        where_clause = "WHERE v.voter_registration_number = ANY(:voter_ids)"
+        order_clause = "ORDER BY v.voter_registration_number"
+    else:
+        vda_join = ""
+        spatial_col = "spatial_district_id"
+        mismatch_col = "district_mismatch"
+        from_clause = "FROM voters v"
+        where_clause = "WHERE v.voter_registration_number = ANY(:voter_ids)"
+        order_clause = "ORDER BY v.voter_registration_number"
+
     if redact_pii:
         # Minimal query - no PII fields
         query_sql = f"""
             SELECT
-                {district_column} as registered_district,
-                county_commission_district,
-                spatial_district_id,
-                district_mismatch,
-                geocode_status,
-                geocode_match_type,
-                ST_AsGeoJSON(geom)::json as geometry
-            FROM voters
-            WHERE voter_registration_number = ANY(:voter_ids)
-            ORDER BY voter_registration_number
+                v.{district_column} as registered_district,
+                v.county_commission_district,
+                {spatial_col},
+                {mismatch_col},
+                v.geocode_status,
+                v.geocode_match_type,
+                ST_AsGeoJSON(v.geom)::json as geometry
+            {from_clause}
+            {vda_join}
+            {where_clause}
+            {order_clause}
         """
     else:
         # Full query with PII
         query_sql = f"""
             SELECT
-                voter_registration_number,
-                COALESCE(first_name || ' ' || last_name, 'Unknown') as full_name,
+                v.voter_registration_number,
+                COALESCE(v.first_name || ' ' || v.last_name, 'Unknown') as full_name,
                 COALESCE(
-                    residence_street_number || ' ' ||
-                    COALESCE(residence_pre_direction || ' ', '') ||
-                    residence_street_name || ' ' ||
-                    COALESCE(residence_street_type, ''),
+                    v.residence_street_number || ' ' ||
+                    COALESCE(v.residence_pre_direction || ' ', '') ||
+                    v.residence_street_name || ' ' ||
+                    COALESCE(v.residence_street_type, ''),
                     'Unknown'
                 ) as street_address,
-                residence_city,
-                status,
-                {district_column} as registered_district,
-                county_commission_district,
-                spatial_district_id,
-                district_mismatch,
-                geocode_status,
-                geocode_match_type,
-                ST_AsGeoJSON(geom)::json as geometry
-            FROM voters
-            WHERE voter_registration_number = ANY(:voter_ids)
-            ORDER BY voter_registration_number
+                v.residence_city,
+                v.status,
+                v.{district_column} as registered_district,
+                v.county_commission_district,
+                {spatial_col},
+                {mismatch_col},
+                v.geocode_status,
+                v.geocode_match_type,
+                ST_AsGeoJSON(v.geom)::json as geometry
+            {from_clause}
+            {vda_join}
+            {where_clause}
+            {order_clause}
         """
 
-    result = session.execute(text(query_sql), {"voter_ids": voter_ids})
+    query_params = {"voter_ids": voter_ids}
+    if use_vda_join:
+        query_params["district_type"] = district_type[0]
+
+    result = session.execute(text(query_sql), query_params)
     rows = result.fetchall()
 
     # Build GeoJSON FeatureCollection
@@ -1714,6 +1742,7 @@ def _get_districts_geojson(
 def _get_county_boundary_geojson(
     session: Session,
     county: str,
+    state_fips: str | None = None,
 ) -> dict:
     """
     Query a single county boundary as GeoJSON for map overlay.
@@ -1721,26 +1750,33 @@ def _get_county_boundary_geojson(
     Args:
         session: SQLAlchemy session.
         county: County name (normalized to uppercase) to look up.
+        state_fips: State FIPS code to filter by (e.g., "13" for Georgia).
 
     Returns:
         GeoJSON FeatureCollection dict (0 or 1 features).
     """
-    logger.info(f"Querying county boundary for '{county}'...")
+    logger.info(f"Querying county boundary for '{county}' (state_fips={state_fips})...")
 
     normalized_county = county.strip().upper()
 
-    query_sql = """
+    state_filter_sql = ""
+    params: dict = {"county_pattern": f"%{normalized_county}%"}
+    if state_fips:
+        state_filter_sql = " AND d.extra_properties->>'STATEFP' = :state_fips"
+        params["state_fips"] = state_fips
+
+    query_sql = f"""
         SELECT
             d.district_id,
             d.name as county_name,
             ST_AsGeoJSON(d.geom)::json as geometry
         FROM district_boundaries d
         WHERE d.district_type = 'county'
-          AND UPPER(d.name) LIKE :county_pattern
+          AND UPPER(d.name) LIKE :county_pattern{state_filter_sql}
         LIMIT 1
     """
 
-    result = session.execute(text(query_sql), {"county_pattern": f"%{normalized_county}%"})
+    result = session.execute(text(query_sql), params)
     row = result.fetchone()
 
     if not row:
@@ -1894,7 +1930,16 @@ def generate_leaflet_map(
     # Query county boundary when filtering by a single county
     county_geojson = {"type": "FeatureCollection", "features": []}
     if county:
-        county_geojson = _get_county_boundary_geojson(session, county)
+        # Infer state FIPS from voter data to disambiguate counties with the same name
+        state_fips = session.execute(
+            text(
+                "SELECT geocode_state_fips FROM voters"
+                " WHERE county = :county AND geocode_state_fips IS NOT NULL"
+                " LIMIT 1"
+            ),
+            {"county": county.strip().upper()},
+        ).scalar()
+        county_geojson = _get_county_boundary_geojson(session, county, state_fips=state_fips)
 
     # Calculate map bounds
     # When filtering by county, use county boundary for bounds (districts may extend far beyond)
