@@ -1056,6 +1056,8 @@ def compare_voter_districts(
     )
 
     if limit:
+        if not isinstance(limit, int) or limit < 0:
+            raise ValueError("limit must be a non-negative integer")
         query = text(str(query) + f" LIMIT {limit}")
 
     logger.info("Executing spatial join query...")
@@ -1450,6 +1452,8 @@ def _get_voters_geojson(
     query_sql += " ORDER BY voter_registration_number"
 
     if limit:
+        if not isinstance(limit, int) or limit < 0:
+            raise ValueError("limit must be a non-negative integer")
         query_sql += f" LIMIT {limit}"
 
     result = session.execute(text(query_sql))
@@ -2075,8 +2079,23 @@ def import_district_boundaries(
                 stats["skipped"] += 1
                 continue
 
-            # Convert GeoJSON geometry to PostGIS
+            # Convert GeoJSON geometry to PostGIS with validation
             shapely_geom = shape(geometry)
+            
+            # Validate geometry
+            if not shapely_geom.is_valid:
+                logger.warning(
+                    f"Feature {idx}: Invalid geometry for district {did}, attempting to fix..."
+                )
+                # buffer(0) is a common technique to fix invalid geometries
+                shapely_geom = shapely_geom.buffer(0)
+                if not shapely_geom.is_valid:
+                    logger.error(
+                        f"Feature {idx}: Could not fix invalid geometry for district {did}, skipping"
+                    )
+                    stats["failed"] += 1
+                    continue
+            
             wkt = shapely_geom.wkt
             geom = WKTElement(wkt, srid=4326)
 
@@ -2206,6 +2225,16 @@ def compare_all_districts(
 
     for dtype in types_to_compare:
         voter_column = DISTRICT_TYPES[dtype]
+        
+        # Validate column name to prevent SQL injection
+        # Only allow alphanumeric characters and underscores
+        if not voter_column.replace('_', '').isalnum():
+            raise ValueError(f"Invalid column name: {voter_column}")
+        
+        # Verify column exists on Voter model
+        if not hasattr(Voter, voter_column):
+            raise ValueError(f"Column {voter_column} does not exist on Voter model")
+        
         logger.info(f"Comparing district type '{dtype}' (voter column: {voter_column})...")
 
         # Spatial join query
@@ -2222,6 +2251,8 @@ def compare_all_districts(
             WHERE v.geom IS NOT NULL
         """
         if limit:
+            if not isinstance(limit, int) or limit < 0:
+                raise ValueError("limit must be a non-negative integer")
             query_sql += f" LIMIT {limit}"
 
         rows = session.execute(text(query_sql), {"district_type": dtype}).fetchall()
