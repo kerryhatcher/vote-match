@@ -1543,7 +1543,7 @@ def _get_districts_geojson(
     # Build query using generic district_boundaries table and voter_district_assignments
     # voter_count: Total voters spatially located in this district
     # registered_elsewhere_count: Voters living here but registered elsewhere (mismatch = true)
-    # registered_here_elsewhere_count: Voters registered here but living elsewhere
+    # Note: We only JOIN on spatial_district_id to avoid cartesian products
     query_sql = f"""
         SELECT
             d.district_id,
@@ -1551,28 +1551,23 @@ def _get_districts_geojson(
             d.rep_name as representative_name,
             d.party,
             d.email as contact_email,
-            d.district_url as website,
+            d.website_url as website,
             ST_AsGeoJSON(d.geom)::json as geometry,
-            COUNT(CASE WHEN vda.spatial_district_id = d.district_id THEN 1 END) as voter_count,
-            COUNT(CASE
+            COUNT(DISTINCT CASE WHEN vda.spatial_district_id = d.district_id THEN vda.voter_id END) as voter_count,
+            COUNT(DISTINCT CASE
                 WHEN vda.spatial_district_id = d.district_id
                     AND vda.is_mismatch = true
                     {filter_sql}
-                THEN 1
+                THEN vda.voter_id
             END) as registered_elsewhere_count,
-            COUNT(CASE
-                WHEN vda.registered_value IS NOT NULL
-                    AND (vda.spatial_district_id IS NULL OR vda.spatial_district_id != d.district_id)
-                    {filter_sql}
-                THEN 1
-            END) as registered_here_elsewhere_count
+            0 as registered_here_elsewhere_count
         FROM district_boundaries d
         LEFT JOIN voter_district_assignments vda
             ON vda.district_type = :district_type
-            AND (vda.spatial_district_id = d.district_id OR vda.registered_value IS NOT NULL)
+            AND vda.spatial_district_id = d.district_id
         LEFT JOIN voters v ON v.voter_registration_number = vda.voter_id AND v.geom IS NOT NULL
         WHERE d.district_type = :district_type
-        GROUP BY d.district_id, d.name, d.rep_name, d.party, d.email, d.district_url, d.geom
+        GROUP BY d.district_id, d.name, d.rep_name, d.party, d.email, d.website_url, d.geom
         ORDER BY d.district_id
     """
 
