@@ -29,9 +29,7 @@ def upgrade() -> None:
     # Drop the auto-generated index if it exists
     # SQLAlchemy auto-names these as: ix_<tablename>_<columnname>
     with op.get_context().autocommit_block():
-        op.execute(
-            "DROP INDEX IF EXISTS ix_district_boundaries_district_type"
-        )
+        op.execute("DROP INDEX IF EXISTS ix_district_boundaries_district_type")
 
 
 def downgrade() -> None:

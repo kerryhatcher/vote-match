@@ -2283,6 +2283,309 @@ def list_district_types() -> None:
 
 
 @app.command()
+def import_shapefiles(
+    data_dir: Path = typer.Option(
+        Path("data"),
+        "--data-dir",
+        "-d",
+        help="Directory containing district ZIP files (default: ./data)",
+    ),
+    clear: bool = typer.Option(
+        False,
+        "--clear",
+        help="Clear existing boundaries before importing (requires confirmation)",
+    ),
+    skip_existing: bool = typer.Option(
+        True,
+        "--skip-existing/--no-skip-existing",
+        help="Skip files for district types that already have boundaries (default: True)",
+    ),
+) -> None:
+    """Batch import all district shapefiles from the data directory.
+
+    Automatically maps district ZIP files to their types based on filename:
+    - congress-*.zip → congressional
+    - senate-*.zip → state_senate
+    - house-*.zip → state_house
+    - bibbcc-*.zip → county_commission (Bibb County Commission)
+    - bibbsb-*.zip → school_board (Bibb School Board)
+    - gaprec-*.zip → county_precinct (GA Precincts)
+    - psc-*.zip → psc (Public Service Commission)
+
+    Example:
+        vote-match import-shapefiles --data-dir data
+        vote-match import-shapefiles --clear --no-skip-existing
+    """
+    logger.info(f"import-shapefiles command called with data_dir: {data_dir}")
+
+    # Import processing function
+    from vote_match.processing import import_district_boundaries
+
+    # Filename prefix to district type mapping
+    FILENAME_TO_DISTRICT_TYPE = {
+        "congress": "congressional",
+        "senate": "state_senate",
+        "house": "state_house",
+        "bibbcc": "county_commission",
+        "bibbsb": "school_board",
+        "gaprec": "county_precinct",
+        "psc": "psc",
+    }
+
+    # Validate data directory
+    if not data_dir.exists():
+        typer.secho(
+            f"✗ Error: Data directory not found: {data_dir}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    if not data_dir.is_dir():
+        typer.secho(
+            f"✗ Error: Not a directory: {data_dir}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Find all ZIP files and map to district types
+    zip_files = list(data_dir.glob("*.zip"))
+    if not zip_files:
+        typer.secho(
+            f"✗ No ZIP files found in {data_dir}",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Build import plan
+    import_plan: list[tuple[Path, str]] = []
+    unmatched_files: list[Path] = []
+
+    for zip_file in sorted(zip_files):
+        # Skip checksum files
+        if zip_file.suffix == ".txt" or ".sha512" in zip_file.name:
+            continue
+
+        matched = False
+        filename_lower = zip_file.name.lower()
+
+        for prefix, district_type in FILENAME_TO_DISTRICT_TYPE.items():
+            if filename_lower.startswith(prefix):
+                import_plan.append((zip_file, district_type))
+                matched = True
+                break
+
+        if not matched:
+            unmatched_files.append(zip_file)
+
+    # Display import plan
+    console.print("\n[bold cyan]Import Plan[/bold cyan]\n")
+
+    if import_plan:
+        plan_table = Table(show_header=True, header_style="bold magenta")
+        plan_table.add_column("File", style="cyan")
+        plan_table.add_column("District Type", style="green")
+
+        for file_path, district_type in import_plan:
+            plan_table.add_row(file_path.name, district_type)
+
+        console.print(plan_table)
+    else:
+        typer.secho("✗ No matching files found to import", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+    if unmatched_files:
+        console.print("\n[yellow]Unmatched files (will be skipped):[/yellow]")
+        for file_path in unmatched_files:
+            console.print(f"  - {file_path.name}")
+
+    console.print()
+
+    # Get database connection
+    settings = get_settings()
+    engine = get_engine(settings)
+    session = get_session(engine)
+
+    try:
+        # Check which district types already have boundaries
+        existing_districts: set[str] = set()
+        for _, district_type in import_plan:
+            count = (
+                session.query(DistrictBoundary)
+                .filter(DistrictBoundary.district_type == district_type)
+                .count()
+            )
+            if count > 0:
+                existing_districts.add(district_type)
+
+        # Handle clear option
+        if clear:
+            if existing_districts:
+                typer.secho(
+                    f"\n⚠ Warning: This will delete ALL existing boundaries for {len(existing_districts)} district types:\n",
+                    fg=typer.colors.YELLOW,
+                    bold=True,
+                )
+                for district_type in sorted(existing_districts):
+                    count = (
+                        session.query(DistrictBoundary)
+                        .filter(DistrictBoundary.district_type == district_type)
+                        .count()
+                    )
+                    typer.secho(f"  - {district_type}: {count} boundaries", fg=typer.colors.YELLOW)
+
+                confirmed = typer.confirm("\nAre you sure you want to continue?", default=False)
+                if not confirmed:
+                    typer.secho("✗ Import cancelled", fg=typer.colors.YELLOW)
+                    raise typer.Exit(code=0)
+
+                # Clear all existing boundaries for types in import plan
+                for _, district_type in import_plan:
+                    session.query(DistrictBoundary).filter(
+                        DistrictBoundary.district_type == district_type
+                    ).delete()
+                session.commit()
+                typer.secho("✓ Cleared existing boundaries\n", fg=typer.colors.GREEN)
+                existing_districts.clear()
+
+        # Import each file
+        results: list[tuple[str, str, dict[str, int]]] = []
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            for file_path, district_type in import_plan:
+                # Skip if already exists and skip_existing is True
+                if skip_existing and district_type in existing_districts:
+                    task = progress.add_task(f"Skipping {district_type} (already exists)", total=1)
+                    progress.update(task, advance=1)
+                    results.append(
+                        (
+                            file_path.name,
+                            district_type,
+                            {"total": 0, "success": 0, "failed": 0, "skipped": 0},
+                        )
+                    )
+                    logger.info(f"Skipped {district_type} - already exists")
+                    continue
+
+                # Import boundaries
+                task = progress.add_task(f"Importing {district_type}...", total=None)
+
+                try:
+                    stats = import_district_boundaries(
+                        session=session,
+                        file_path=file_path,
+                        district_type=district_type,
+                        clear_existing=False,  # Already handled above if needed
+                    )
+                    results.append((file_path.name, district_type, stats))
+                    progress.update(task, completed=1, total=1)
+                    logger.info(
+                        f"Imported {district_type}: {stats['success']} success, "
+                        f"{stats['failed']} failed, {stats['skipped']} skipped"
+                    )
+                except Exception as e:
+                    progress.update(task, completed=1, total=1)
+                    logger.error(f"Failed to import {district_type}: {e}")
+                    results.append(
+                        (
+                            file_path.name,
+                            district_type,
+                            {"total": 0, "success": 0, "failed": 1, "skipped": 0},
+                        )
+                    )
+
+        # Display results summary
+        console.print("\n[bold cyan]Import Summary[/bold cyan]\n")
+
+        summary_table = Table(show_header=True, header_style="bold magenta")
+        summary_table.add_column("File", style="cyan")
+        summary_table.add_column("District Type", style="white")
+        summary_table.add_column("Total", justify="right", style="blue")
+        summary_table.add_column("Success", justify="right", style="green")
+        summary_table.add_column("Failed", justify="right", style="red")
+        summary_table.add_column("Skipped", justify="right", style="yellow")
+
+        total_all = 0
+        success_all = 0
+        failed_all = 0
+        skipped_all = 0
+
+        for filename, district_type, stats in results:
+            total_all += stats["total"]
+            success_all += stats["success"]
+            failed_all += stats["failed"]
+            skipped_all += stats["skipped"]
+
+            # Show status indicator
+            if stats["total"] == 0 and stats["failed"] == 0:
+                # Skipped because already exists
+                status = "⊘"
+            elif stats["failed"] > 0:
+                status = "✗"
+            elif stats["success"] > 0:
+                status = "✓"
+            else:
+                status = "-"
+
+            summary_table.add_row(
+                f"{status} {filename}",
+                district_type,
+                str(stats["total"]),
+                str(stats["success"]),
+                str(stats["failed"]),
+                str(stats["skipped"]),
+            )
+
+        # Add totals row
+        summary_table.add_row(
+            "[bold]TOTAL[/bold]",
+            "",
+            f"[bold]{total_all}[/bold]",
+            f"[bold]{success_all}[/bold]",
+            f"[bold]{failed_all}[/bold]",
+            f"[bold]{skipped_all}[/bold]",
+        )
+
+        console.print(summary_table)
+        console.print()
+
+        # Final status message
+        if failed_all > 0:
+            typer.secho(
+                f"⚠ Import completed with {failed_all} failures",
+                fg=typer.colors.YELLOW,
+                bold=True,
+            )
+        elif success_all > 0:
+            typer.secho(
+                f"✓ Successfully imported {success_all} district boundaries",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+        else:
+            typer.secho(
+                "✓ All districts already imported (use --no-skip-existing to re-import)",
+                fg=typer.colors.GREEN,
+            )
+
+        session.close()
+        engine.dispose()
+
+    except Exception as e:
+        session.close()
+        engine.dispose()
+        logger.exception("import-shapefiles failed with error: {}", e)
+        typer.secho(f"✗ Error: {e}", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def compare_districts(
     district_type: list[str] | None = typer.Option(
         None,

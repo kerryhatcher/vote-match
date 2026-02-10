@@ -21,6 +21,9 @@ Vote Match is a Python tool for processing voter registration records for GIS ap
 - `vote-match geocode --service <name>` - Geocode addresses using specified service (census, nominatim, etc.)
 - `vote-match sync-geocode` - **Required for QGIS**: Sync best geocoding results to Voter table
 - `vote-match delete-geocode-results --service <name> --status <status>` - Delete geocoding results for retry
+- `vote-match import-shapefiles` - Batch import all district shapefiles from data folder
+- `vote-match import-geojson <file> --district-type <type>` - Import individual district shapefile/GeoJSON
+- `vote-match compare-districts --district-type <type>` - Compare voter registered districts vs spatial districts
 - `vote-match status` - View geocoding statistics and progress
 - `vote-match export <file>` - Export voter data to CSV or GeoJSON
 
@@ -159,6 +162,95 @@ New services are registered in `src/vote_match/geocoding/registry.py`:
 2. Inherit from `GeocodeService` base class
 3. Implement `geocode_batch()` method
 4. Register with `@GeocodeServiceRegistry.register()` decorator
+
+## District Management
+
+Vote Match supports importing and comparing district boundaries for spatial analysis.
+
+### Supported District Types
+
+The following district types are supported (see `DISTRICT_TYPES` in `models.py`):
+
+- **congressional** - US Congressional Districts
+- **state_senate** - State Senate Districts
+- **state_house** - State House/Assembly Districts
+- **county_commission** - County Commission Districts
+- **school_board** - School Board Districts
+- **county_precinct** - County Voting Precincts
+- **psc** - Public Service Commission Districts
+- **city_council** - City Council Districts
+- **judicial** - Judicial Districts
+- **municipality** - City/Town Boundaries
+- **fire** - Fire Districts
+- **water_board** - Water Board Districts
+- Other super-districts and municipal districts
+
+### Batch Import Workflow
+
+For importing multiple district shapefiles at once:
+
+1. **Place shapefiles in data directory**
+   - Files must be in ZIP format containing shapefiles
+   - Filename prefixes are auto-mapped to district types:
+     - `congress-*.zip` → congressional
+     - `senate-*.zip` → state_senate
+     - `house-*.zip` → state_house
+     - `bibbcc-*.zip` → county_commission
+     - `bibbsb-*.zip` → school_board
+     - `gaprec-*.zip` → county_precinct
+     - `psc-*.zip` → psc
+
+2. **Run batch import**
+
+   ```bash
+   vote-match import-shapefiles --data-dir data
+   ```
+
+3. **Verify import**
+
+   ```bash
+   # Check imported districts in database
+   psql -d vote_match -c "SELECT district_type, COUNT(*) FROM district_boundaries GROUP BY district_type;"
+   ```
+
+**Import options:**
+
+- `--skip-existing` (default: True) - Skip district types that already have boundaries
+- `--no-skip-existing` - Re-import even if boundaries exist
+- `--clear` - Delete all existing boundaries before importing (requires confirmation)
+
+### Individual Import
+
+For importing a single district file:
+
+```bash
+vote-match import-geojson data/congress-2023-shape.zip --district-type congressional
+```
+
+Supports: `.geojson`, `.json`, `.shp`, `.zip` (containing shapefiles)
+
+### District Comparison
+
+Compare voter registered districts vs spatial districts using PostGIS spatial joins:
+
+```bash
+# Compare single district type
+vote-match compare-districts --district-type congressional --save-to-db
+
+# Compare multiple district types
+vote-match compare-districts --district-type congressional --district-type state_senate --save-to-db
+
+# Export comparison results
+vote-match compare-districts --district-type congressional --export mismatches.csv
+```
+
+### QGIS Visualization
+
+1. Connect to PostGIS database
+2. Load `district_boundaries` layer
+3. Filter by `district_type` to view specific districts
+4. Style polygons by district properties (name, party, etc.)
+5. Overlay with `voters` layer (requires `sync-geocode` first)
 
 ## Database Migrations
 
