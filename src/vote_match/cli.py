@@ -2002,13 +2002,14 @@ def import_geojson(
         ...,
         help="Path to GeoJSON file containing district boundaries",
     ),
-    district_type: str = typer.Option(
-        ...,
+    district_type: str | None = typer.Option(
+        None,
         "--district-type",
         "-t",
         help=(
             "Type of district boundaries being imported. "
             "Use 'list' to show all valid types. "
+            "Required unless --legacy is used. "
             "Examples: congressional, state_senate, county_commission, school_board"
         ),
     ),
@@ -2043,6 +2044,16 @@ def import_geojson(
 
     The GeoJSON file should contain a FeatureCollection with district polygons.
     """
+    # Validate: either legacy OR district_type must be provided
+    if not legacy and district_type is None:
+        typer.secho(
+            "✗ Error: --district-type is required unless using --legacy",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        typer.echo("\nUse 'vote-match list-district-types' to see available types")
+        raise typer.Exit(code=1)
+
     # Handle 'list' subcommand
     if district_type == "list":
         table = Table(title="Available District Types", header_style="bold magenta")
@@ -2129,6 +2140,9 @@ def import_geojson(
         return
 
     # --- New generic path ---
+    # After legacy path returns, district_type is guaranteed to be set
+    assert district_type is not None  # Type narrowing for mypy
+
     if district_type not in DISTRICT_TYPES:
         typer.secho(
             f"✗ Unknown district type '{district_type}'. "
@@ -2225,6 +2239,47 @@ def import_geojson(
         typer.secho(f"✗ Import failed: {e}", fg=typer.colors.RED, bold=True)
         logger.exception("import-geojson failed with error: {}", e)
         raise typer.Exit(code=1)
+
+
+@app.command()
+def list_district_types() -> None:
+    """List all valid district types that can be imported and compared.
+
+    Shows the mapping between district type keys (used in commands) and
+    the corresponding voter registration columns.
+    """
+    table = Table(title="Available District Types", header_style="bold magenta")
+    table.add_column("Type Key", style="cyan", no_wrap=True)
+    table.add_column("Voter Column", style="green")
+    table.add_column("Description", style="white", max_width=50)
+
+    # Add descriptions for common types
+    descriptions = {
+        "congressional": "US Congressional Districts",
+        "state_senate": "State Senate Districts",
+        "state_house": "State House/Assembly Districts",
+        "county_commission": "County Commission Districts",
+        "school_board": "School Board Districts",
+        "city_council": "City Council Districts",
+        "judicial": "Judicial Districts",
+        "county_precinct": "County Voting Precincts",
+        "municipality": "City/Town Boundaries",
+        "fire": "Fire Districts",
+    }
+
+    for key, col in sorted(DISTRICT_TYPES.items()):
+        desc = descriptions.get(key, "")
+        table.add_row(key, col, desc)
+
+    console.print()
+    console.print(table)
+    console.print()
+    console.print(
+        "[dim]Use these type keys with:[/dim]\n"
+        "  [cyan]vote-match import-geojson file.json --district-type <type>[/cyan]\n"
+        "  [cyan]vote-match compare-districts --district-type <type>[/cyan]"
+    )
+    console.print()
 
 
 @app.command()

@@ -2025,6 +2025,17 @@ def import_district_boundaries(
 
     stats: dict[str, int] = {"total": len(features), "success": 0, "failed": 0, "skipped": 0}
 
+    # Prefetch existing district IDs to avoid N+1 queries
+    existing_ids_stmt = (
+        session.query(DistrictBoundary.district_id)
+        .filter(DistrictBoundary.district_type == district_type)
+        .all()
+    )
+    existing_district_ids = {row[0] for row in existing_ids_stmt}
+    logger.debug(
+        f"Found {len(existing_district_ids)} existing {district_type} districts in database"
+    )
+
     for idx, feature in enumerate(features, 1):
         try:
             props = feature.get("properties", {})
@@ -2064,13 +2075,8 @@ def import_district_boundaries(
             if not dname:
                 dname = f"{district_type} {did}"
 
-            # Check for duplicates
-            existing = (
-                session.query(DistrictBoundary)
-                .filter_by(district_type=district_type, district_id=did)
-                .first()
-            )
-            if existing:
+            # Check for duplicates using prefetched set
+            if did in existing_district_ids:
                 logger.debug(f"District {district_type}/{did} already exists, skipping")
                 stats["skipped"] += 1
                 continue
@@ -2185,6 +2191,20 @@ def compare_all_districts(
         logger.warning("No district boundaries found in database")
         return {}
 
+    # Validate that available types are recognized
+    valid_available_types = available_types & set(DISTRICT_TYPES.keys())
+    invalid_types = available_types - set(DISTRICT_TYPES.keys())
+
+    if invalid_types:
+        logger.warning(
+            f"Found {len(invalid_types)} unknown district type(s) in database: "
+            f"{', '.join(sorted(invalid_types))}. These will be skipped. "
+            f"Valid types: {', '.join(sorted(DISTRICT_TYPES.keys()))}"
+        )
+
+    # Use validated types instead of raw available_types
+    available_types = valid_available_types
+
     if district_types:
         types_to_compare = [t for t in district_types if t in available_types]
         missing = set(district_types) - available_types
@@ -2208,9 +2228,9 @@ def compare_all_districts(
         voter_column = DISTRICT_TYPES[dtype]
         logger.info(f"Comparing district type '{dtype}' (voter column: {voter_column})...")
 
-        # Spatial join query
+        # Spatial join query with DISTINCT ON to handle overlapping boundaries
         query_sql = f"""
-            SELECT
+            SELECT DISTINCT ON (v.voter_registration_number)
                 v.voter_registration_number,
                 v.{voter_column} AS registered_value,
                 d.district_id AS spatial_district_id,
@@ -2220,11 +2240,15 @@ def compare_all_districts(
                 ON d.district_type = :district_type
                 AND ST_Within(v.geom, d.geom)
             WHERE v.geom IS NOT NULL
+            ORDER BY v.voter_registration_number, d.district_id ASC
         """
         if limit:
-            query_sql += f" LIMIT {limit}"
-
-        rows = session.execute(text(query_sql), {"district_type": dtype}).fetchall()
+            query_sql += " LIMIT :limit_val"
+            rows = session.execute(
+                text(query_sql), {"district_type": dtype, "limit_val": limit}
+            ).fetchall()
+        else:
+            rows = session.execute(text(query_sql), {"district_type": dtype}).fetchall()
 
         stats = {
             "total": len(rows),
@@ -2333,14 +2357,15 @@ def _save_district_assignments(
     for i in range(0, len(assignments), batch_size):
         batch = assignments[i : i + batch_size]
         stmt = pg_insert(VoterDistrictAssignment).values(batch)
-        stmt = stmt.on_conflict_on_constraint("uq_voter_district_type").do_update(
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_voter_district_type",
             set_={
                 "registered_value": stmt.excluded.registered_value,
                 "spatial_district_id": stmt.excluded.spatial_district_id,
                 "spatial_district_name": stmt.excluded.spatial_district_name,
                 "is_mismatch": stmt.excluded.is_mismatch,
                 "compared_at": stmt.excluded.compared_at,
-            }
+            },
         )
         session.execute(stmt)
 

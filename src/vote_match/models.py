@@ -381,7 +381,7 @@ class DistrictBoundary(Base):
     id = Column(Integer, primary_key=True)
 
     # District type must match a key in DISTRICT_TYPES
-    district_type = Column(String(50), nullable=False, index=True)
+    district_type = Column(String(50), nullable=False)
 
     # District identifier (e.g., "1", "4A") - unique within a district_type
     district_id = Column(String(50), nullable=False)
