@@ -2334,6 +2334,10 @@ def compare_all_districts(
         if save_to_db and assignments:
             _save_district_assignments(session, dtype, assignments)
 
+    # Update legacy district_mismatch field after all districts are compared
+    if save_to_db:
+        _update_legacy_mismatch_field(session)
+
     return results
 
 
@@ -2371,6 +2375,43 @@ def _save_district_assignments(
 
     session.commit()
     logger.info(f"Saved {len(assignments)} assignments for {district_type}")
+
+
+def _update_legacy_mismatch_field(session: Session) -> int:
+    """Update Voter.district_mismatch from VoterDistrictAssignment.
+
+    Sets district_mismatch = True if voter has ANY mismatch across ANY district type.
+    This maintains backward compatibility with existing QGIS projects and queries.
+
+    Returns:
+        Number of voters updated
+    """
+    from sqlalchemy import text
+
+    logger.info("Updating legacy Voter.district_mismatch field from VoterDistrictAssignment")
+
+    # Update using SQL for efficiency
+    update_sql = """
+        UPDATE voters
+        SET district_mismatch = subquery.has_mismatch,
+            district_compared_at = NOW()
+        FROM (
+            SELECT
+                voter_id,
+                BOOL_OR(is_mismatch) as has_mismatch
+            FROM voter_district_assignments
+            GROUP BY voter_id
+        ) as subquery
+        WHERE voters.voter_registration_number = subquery.voter_id
+    """
+
+    result = session.execute(text(update_sql))
+    session.commit()
+
+    updated_count = result.rowcount
+    logger.info(f"Updated district_mismatch for {updated_count} voters")
+
+    return updated_count
 
 
 def get_district_status(session: Session) -> dict[str, dict]:

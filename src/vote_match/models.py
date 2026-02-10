@@ -466,4 +466,7 @@ class VoterDistrictAssignment(Base):
         Index("idx_vda_voter", "voter_id"),
         Index("idx_vda_type", "district_type"),
         Index("idx_vda_mismatch", "is_mismatch"),
+        # Composite indexes for filtering performance
+        Index("idx_vda_voter_mismatch", "voter_id", "is_mismatch"),
+        Index("idx_vda_type_mismatch", "district_type", "is_mismatch"),
     )

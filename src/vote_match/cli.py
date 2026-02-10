@@ -1552,7 +1552,7 @@ def export(
     """Export voter records to CSV, GeoJSON, or interactive Leaflet map."""
     logger.info(
         "export command called with output: {}, format: {}, matched_only: {}, "
-        "mismatch_only: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, upload_to_r2: {}, redact_pii: {}, print_embed_code: {}",
+        "mismatch_only: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, county: {}, upload_to_r2: {}, redact_pii: {}, print_embed_code: {}",
         output,
         format,
         matched_only,
@@ -1561,6 +1561,7 @@ def export(
         include_districts,
         title,
         limit,
+        county,
         upload_to_r2,
         redact_pii,
         print_embed_code,
@@ -1631,6 +1632,11 @@ def export(
 
             if exact_match_only:
                 query = query.filter(Voter.geocode_match_type == "exact")
+
+            if county:
+                # Normalize county name to uppercase for consistent matching
+                normalized_county = county.strip().upper()
+                query = query.filter(Voter.county == normalized_county)
 
             if limit:
                 query = query.limit(limit)
