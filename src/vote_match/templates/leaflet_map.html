@@ -286,40 +286,53 @@
             return div.innerHTML;
         }
 
-        // Custom colors for voter markers (by registered district)
-        const voterColors = {
-            '1': '#377eb8',
-            '2': '#efa710',
-            '3': '#c6b0d8',
-            '4': '#f2c25a',
-            '5': '#e20000',
-            '6': '#f96060',
-            '7': '#8a664a',
-            '8': '#2d802f',
-            '9': '#930eb4',
-        };
+        // Color palette with enough distinct colors for any number of districts
+        const colorPalette = [
+            '#377eb8', '#e41a1c', '#4daf4a', '#ff7f00', '#984ea3',
+            '#a65628', '#f781bf', '#1b9e77', '#d95f02', '#7570b3',
+            '#e7298a', '#66a61e', '#e6ab02', '#a6761d', '#666666',
+        ];
 
-        // Light pastel colors for district boundaries
-        const districtColors = {
-            '1': '#ADD8E6',  // Light blue
-            '2': '#F5DEB3',  // Light yellow/wheat
-            '3': '#E6D8F0',  // Light lavender
-            '4': '#FFDAB9',  // Light orange/peach
-            '5': '#FFB6C1',  // Light pink
-            '6': '#FFB6C1',  // Light pink (same as 5)
-            '7': '#D2B48C',  // Light brown/tan
-            '8': '#98FB98',  // Light green
-            '9': '#DDA0DD',  // Light purple/plum
-        };
-
-        // Get color for voter markers
-        function getVoterColor(district) {
-            return voterColors[String(district)] || '#999999';
+        // Normalize district ID by stripping leading zeros
+        function normalizeId(id) {
+            return String(id).replace(/^0+/, '') || '0';
         }
 
-        // Get color for district boundaries
+        // Dynamic color map built from actual data
+        const colorMap = {};
+
+        function buildColorMap(votersData, districtsData) {
+            const ids = new Set();
+            if (districtsData && districtsData.features) {
+                districtsData.features.forEach(function(f) {
+                    if (f.properties.district_id) ids.add(normalizeId(f.properties.district_id));
+                });
+            }
+            if (votersData && votersData.features) {
+                votersData.features.forEach(function(f) {
+                    if (f.properties.registered_district) ids.add(normalizeId(f.properties.registered_district));
+                });
+            }
+            var sorted = Array.from(ids).sort(function(a, b) {
+                var na = parseInt(a), nb = parseInt(b);
+                if (!isNaN(na) && !isNaN(nb)) return na - nb;
+                return a.localeCompare(b);
+            });
+            sorted.forEach(function(id, i) {
+                colorMap[id] = colorPalette[i % colorPalette.length];
+            });
+        }
+
+        function getColor(district) {
+            return colorMap[normalizeId(district)] || '#999999';
+        }
+
+        function getVoterColor(district) {
+            return getColor(district);
+        }
+
         function getDistrictColor(district) {
-            return districtColors[String(district)] || '#CCCCCC';
+            return getColor(district);
         }
 
         // Initialize map
@@ -338,7 +351,11 @@
         // Embedded data
         const votersData = {{ voters_geojson }};
         const districtsData = {{ districts_geojson }};
+        const countyData = {{ county_geojson }};
         const bounds = {{ bounds }};
+
+        // Build color map from actual district IDs in data
+        buildColorMap(votersData, districtsData);
 
         // Create voter popup - all user data is escaped for XSS protection
         function createVoterPopup(properties) {
@@ -427,18 +444,39 @@
             return html;
         }
 
+        // County boundary layer (outline only, no fill)
+        let countyLayer = null;
+        if (countyData && countyData.features && countyData.features.length > 0) {
+            countyLayer = L.geoJSON(countyData, {
+                style: function() {
+                    return {
+                        weight: 4,
+                        color: '#222',
+                        fillOpacity: 0,
+                        dashArray: '10, 6',
+                        opacity: 0.9
+                    };
+                },
+                onEachFeature: function(feature, layer) {
+                    if (feature.properties.county_name) {
+                        layer.bindPopup('<div class="popup-header">' + escapeHtml(feature.properties.county_name) + '</div>');
+                    }
+                }
+            }).addTo(map);
+        }
+
         // Add district layer
         let districtLayer = null;
         if (districtsData && districtsData.features && districtsData.features.length > 0) {
             districtLayer = L.geoJSON(districtsData, {
                 style: function(feature) {
-                    const districtId = feature.properties.district_id;
+                    const c = getDistrictColor(feature.properties.district_id);
                     return {
-                        fillColor: getDistrictColor(districtId),
+                        fillColor: c,
                         weight: 2,
                         opacity: 1,
-                        color: '#333',
-                        fillOpacity: 0.5
+                        color: c,
+                        fillOpacity: 0.45
                     };
                 },
                 onEachFeature: function(feature, layer) {
@@ -598,6 +636,10 @@
             overlayMaps["Districts"] = districtLayer;
         }
 
+        if (countyLayer) {
+            overlayMaps["County Boundary"] = countyLayer;
+        }
+
         if (Object.keys(overlayMaps).length > 0) {
             L.control.layers(null, overlayMaps).addTo(map);
         }
@@ -665,106 +707,63 @@
         };
         creditControl.addTo(map);
 
-        // Add district legend
-        if (districtsData && districtsData.features && districtsData.features.length > 0) {
-            const districtLegend = L.control({ position: 'bottomright' });
-            districtLegend.onAdd = function(map) {
-                // Check if mobile
+        // Build unified district legend using normalized IDs (deduplicates "018" and "18")
+        const allDistricts = new Set();
+        if (districtsData && districtsData.features) {
+            districtsData.features.forEach(function(f) {
+                if (f.properties.district_id) allDistricts.add(normalizeId(f.properties.district_id));
+            });
+        }
+        if (votersData && votersData.features) {
+            votersData.features.forEach(function(f) {
+                if (f.properties.registered_district) allDistricts.add(normalizeId(f.properties.registered_district));
+            });
+        }
+
+        if (allDistricts.size > 0) {
+            const legend = L.control({ position: 'bottomright' });
+            legend.onAdd = function(map) {
                 const isMobile = window.innerWidth < 768;
                 const div = L.DomUtil.create('div', 'legend' + (isMobile ? ' collapsed' : ''));
 
-                // Create header with toggle button
                 const header = L.DomUtil.create('div', 'legend-header', div);
                 const title = L.DomUtil.create('h4', '', header);
                 title.textContent = 'District Colors';
                 const toggleBtn = L.DomUtil.create('button', 'legend-toggle', header);
-                toggleBtn.innerHTML = isMobile ? '▼' : '▲';
-                toggleBtn.setAttribute('aria-expanded', !isMobile);
-                toggleBtn.setAttribute('aria-label', 'Toggle district legend');
+                toggleBtn.textContent = isMobile ? '\u25BC' : '\u25B2';
+                toggleBtn.setAttribute('aria-expanded', String(!isMobile));
+                toggleBtn.setAttribute('aria-label', 'Toggle legend');
 
-                // Create content wrapper
                 const content = L.DomUtil.create('div', 'legend-content', div);
 
-                // Get unique districts
-                const districts = [];
-                for (let i = 1; i <= 9; i++) {
-                    const districtId = String(i);
-                    const hasDistrict = districtsData.features.some(f => String(f.properties.district_id) === districtId);
-                    if (hasDistrict) {
-                        districts.push(districtId);
-                    }
-                }
-
-                // Add legend items - using innerHTML with escaped data
-                districts.forEach(function(district) {
-                    content.innerHTML +=
-                        '<i style="background:' + getDistrictColor(district) + '"></i> ' +
-                        'District ' + escapeHtml(district) + '<br>';
+                const sorted = Array.from(allDistricts).sort(function(a, b) {
+                    if (a === 'unknown') return 1;
+                    if (b === 'unknown') return -1;
+                    return parseInt(a) - parseInt(b);
                 });
 
-                // Add toggle functionality
+                // Legend items use hardcoded color palette; district IDs are safe strings
+                sorted.forEach(function(district) {
+                    const color = getDistrictColor(district);
+                    const item = document.createElement('div');
+                    const swatch = document.createElement('i');
+                    swatch.style.background = color;
+                    item.appendChild(swatch);
+                    item.appendChild(document.createTextNode(' District ' + district));
+                    item.appendChild(document.createElement('br'));
+                    content.appendChild(item);
+                });
+
                 header.onclick = function() {
                     div.classList.toggle('collapsed');
                     const isCollapsed = div.classList.contains('collapsed');
-                    toggleBtn.innerHTML = isCollapsed ? '▼' : '▲';
-                    toggleBtn.setAttribute('aria-expanded', !isCollapsed);
+                    toggleBtn.textContent = isCollapsed ? '\u25BC' : '\u25B2';
+                    toggleBtn.setAttribute('aria-expanded', String(!isCollapsed));
                 };
 
                 return div;
             };
-            districtLegend.addTo(map);
-        }
-
-        // Add voter legend
-        if (votersData && votersData.features && votersData.features.length > 0) {
-            const voterLegend = L.control({ position: 'bottomleft' });
-            voterLegend.onAdd = function(map) {
-                // Check if mobile
-                const isMobile = window.innerWidth < 768;
-                const div = L.DomUtil.create('div', 'legend' + (isMobile ? ' collapsed' : ''));
-
-                // Create header with toggle button
-                const header = L.DomUtil.create('div', 'legend-header', div);
-                const title = L.DomUtil.create('h4', '', header);
-                title.innerHTML = 'Voter Colors<br>(by Registered District)';
-                const toggleBtn = L.DomUtil.create('button', 'legend-toggle', header);
-                toggleBtn.innerHTML = isMobile ? '▼' : '▲';
-                toggleBtn.setAttribute('aria-expanded', !isMobile);
-                toggleBtn.setAttribute('aria-label', 'Toggle voter legend');
-
-                // Create content wrapper
-                const content = L.DomUtil.create('div', 'legend-content', div);
-
-                // Get unique registered districts from voters (uses registered_district for map coloring)
-                const registeredDistricts = new Set();
-                votersData.features.forEach(function(feature) {
-                    const district = feature.properties.registered_district;
-                    if (district) {
-                        registeredDistricts.add(String(district));
-                    }
-                });
-
-                // Sort districts
-                const sortedDistricts = Array.from(registeredDistricts).sort((a, b) => parseInt(a) - parseInt(b));
-
-                // Add legend items - using innerHTML with escaped data
-                sortedDistricts.forEach(function(district) {
-                    content.innerHTML +=
-                        '<i class="circle" style="background:' + getVoterColor(district) + '"></i> ' +
-                        'District ' + escapeHtml(district) + '<br>';
-                });
-
-                // Add toggle functionality
-                header.onclick = function() {
-                    div.classList.toggle('collapsed');
-                    const isCollapsed = div.classList.contains('collapsed');
-                    toggleBtn.innerHTML = isCollapsed ? '▼' : '▲';
-                    toggleBtn.setAttribute('aria-expanded', !isCollapsed);
-                };
-
-                return div;
-            };
-            voterLegend.addTo(map);
+            legend.addTo(map);
         }
     </script>
 </body>

@@ -1711,6 +1711,55 @@ def _get_districts_geojson(
     }
 
 
+def _get_county_boundary_geojson(
+    session: Session,
+    county: str,
+) -> dict:
+    """
+    Query a single county boundary as GeoJSON for map overlay.
+
+    Args:
+        session: SQLAlchemy session.
+        county: County name (normalized to uppercase) to look up.
+
+    Returns:
+        GeoJSON FeatureCollection dict (0 or 1 features).
+    """
+    logger.info(f"Querying county boundary for '{county}'...")
+
+    normalized_county = county.strip().upper()
+
+    query_sql = """
+        SELECT
+            d.district_id,
+            d.name as county_name,
+            ST_AsGeoJSON(d.geom)::json as geometry
+        FROM district_boundaries d
+        WHERE d.district_type = 'county'
+          AND UPPER(d.name) LIKE :county_pattern
+        LIMIT 1
+    """
+
+    result = session.execute(text(query_sql), {"county_pattern": f"%{normalized_county}%"})
+    row = result.fetchone()
+
+    if not row:
+        logger.warning(f"No county boundary found for '{county}'")
+        return {"type": "FeatureCollection", "features": []}
+
+    feature = {
+        "type": "Feature",
+        "geometry": row.geometry,
+        "properties": {
+            "district_id": row.district_id,
+            "county_name": row.county_name,
+        },
+    }
+
+    logger.info(f"Found county boundary: {row.county_name}")
+    return {"type": "FeatureCollection", "features": [feature]}
+
+
 def _calculate_map_bounds(voters_geojson: dict, districts_geojson: dict) -> list:
     """
     Calculate Leaflet map bounds from GeoJSON data.
@@ -1842,8 +1891,17 @@ def generate_leaflet_map(
             county=county,
         )
 
+    # Query county boundary when filtering by a single county
+    county_geojson = {"type": "FeatureCollection", "features": []}
+    if county:
+        county_geojson = _get_county_boundary_geojson(session, county)
+
     # Calculate map bounds
-    bounds = _calculate_map_bounds(voters_geojson, districts_geojson)
+    # When filtering by county, use county boundary for bounds (districts may extend far beyond)
+    if county_geojson.get("features"):
+        bounds = _calculate_map_bounds(voters_geojson, county_geojson)
+    else:
+        bounds = _calculate_map_bounds(voters_geojson, districts_geojson)
 
     # If output_path is provided, create web folder structure
     if output_path:
@@ -1868,6 +1926,16 @@ def generate_leaflet_map(
             districts_path = web_dir / districts_filename
             districts_path.write_text(districts_json)
             logger.info(f"Saved districts GeoJSON: {districts_path}")
+
+        # Generate county boundary GeoJSON with checksum (if applicable)
+        county_filename = None
+        if county_geojson["features"]:
+            county_json = json.dumps(county_geojson, separators=(",", ":"))
+            county_hash = hashlib.sha256(county_json.encode()).hexdigest()[:8]
+            county_filename = f"county.{county_hash}.geojson"
+            county_path = web_dir / county_filename
+            county_path.write_text(county_json)
+            logger.info(f"Saved county GeoJSON: {county_path}")
 
         # Load async HTML template
         template_path = Path(__file__).parent / "templates" / "leaflet_map_async.html"
@@ -1902,6 +1970,8 @@ def generate_leaflet_map(
         html = html.replace("fetch('voters.geojson')", f"fetch('{voters_filename}')")
         if districts_filename:
             html = html.replace("fetch('districts.geojson')", f"fetch('{districts_filename}')")
+        if county_filename:
+            html = html.replace("fetch('county.geojson')", f"fetch('{county_filename}')")
 
         # Save HTML
         index_path = web_dir / html_filename
@@ -1924,6 +1994,7 @@ def generate_leaflet_map(
         html = template_content.replace("{{ title }}", title)
         html = html.replace("{{ voters_geojson }}", json.dumps(voters_geojson))
         html = html.replace("{{ districts_geojson }}", json.dumps(districts_geojson))
+        html = html.replace("{{ county_geojson }}", json.dumps(county_geojson))
         html = html.replace("{{ bounds }}", json.dumps(bounds))
         # Clustering configuration
         html = html.replace("{{ enable_clustering }}", str(settings.map_enable_clustering).lower())
