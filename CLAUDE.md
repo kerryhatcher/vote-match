@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+[Project Background](docs/PROJECT_SUMMARY.md)
+
 ## Project Overview
 
 Vote Match is a Python tool for processing voter registration records for GIS applications. The primary workflow involves:
