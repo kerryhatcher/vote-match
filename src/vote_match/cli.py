@@ -1527,6 +1527,11 @@ def export(
         "--limit",
         help="Limit number of records to export",
     ),
+    county: str | None = typer.Option(
+        None,
+        "--county",
+        help="Filter by county name (e.g., 'BIBB', 'FULTON')",
+    ),
     upload_to_r2: bool = typer.Option(
         False,
         "--upload-to-r2",
@@ -2583,6 +2588,206 @@ def import_shapefiles(
         logger.exception("import-shapefiles failed with error: {}", e)
         typer.secho(f"✗ Error: {e}", fg=typer.colors.RED, bold=True)
         raise typer.Exit(code=1)
+
+
+@app.command(name="link-districts-to-counties")
+def link_districts_to_counties(
+    csv_file: Path | None = typer.Argument(
+        None,
+        help="Path to CSV file mapping counties to districts (e.g., counties-by-districts-2023.csv)",
+        exists=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    spatial: bool = typer.Option(
+        False,
+        "--spatial",
+        help="Use PostGIS spatial joins instead of CSV mapping",
+    ),
+    district_type: str | None = typer.Option(
+        None,
+        "--district-type",
+        "-t",
+        help="Specific district type to process (default: all)",
+    ),
+    state_fips: str | None = typer.Option(
+        None,
+        "--state-fips",
+        help="State FIPS code for spatial filtering (e.g., '13' for Georgia)",
+    ),
+    validate: bool = typer.Option(
+        False,
+        "--validate",
+        help="Compare CSV vs spatial results and report mismatches",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Overwrite existing county associations",
+    ),
+) -> None:
+    """Link districts to counties for QGIS filtering.
+
+    This command associates district boundaries with county names to enable
+    filtering in QGIS. It supports two modes:
+
+    1. CSV mode: Use authoritative county-to-district mappings from CSV
+       (Georgia only: congressional, state_senate, state_house)
+
+    2. Spatial mode: Use PostGIS spatial joins to automatically determine
+       which counties intersect which districts (works for any state/district type)
+
+    3. Validate mode: Compare CSV vs spatial results to identify mismatches
+
+    Examples:
+
+        # Link Georgia districts using CSV (authoritative)
+        vote-match link-districts-to-counties data/counties-by-districts-2023.csv
+
+        # Use spatial joins for all districts
+        vote-match link-districts-to-counties --spatial
+
+        # Use spatial joins for specific district type
+        vote-match link-districts-to-counties --spatial --district-type congressional
+
+        # Validate CSV vs spatial results
+        vote-match link-districts-to-counties --validate data/counties-by-districts-2023.csv
+
+        # Filter spatial joins to Georgia counties only
+        vote-match link-districts-to-counties --spatial --state-fips 13
+    """
+    from .county_linking import (
+        link_districts_from_csv,
+        link_districts_spatial,
+        validate_county_links,
+    )
+
+    logger.info(
+        f"link-districts-to-counties called with csv_file={csv_file}, "
+        f"spatial={spatial}, validate={validate}, district_type={district_type}"
+    )
+
+    # Validate arguments
+    if validate and not csv_file:
+        typer.secho(
+            "✗ Error: --validate requires a CSV file argument",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    if not csv_file and not spatial:
+        typer.secho(
+            "✗ Error: Must provide either a CSV file or use --spatial flag",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Setup database
+    settings = get_settings()
+    engine = get_engine(settings)
+    session = get_session(engine)
+
+    try:
+        # Validation mode
+        if validate:
+            typer.secho(
+                "⚙ Validating county links (CSV vs spatial)...",
+                fg=typer.colors.CYAN,
+            )
+            results = validate_county_links(session, csv_file, district_type)
+
+            typer.secho("\n📊 Validation Results:", fg=typer.colors.YELLOW, bold=True)
+            typer.secho(f"  ✓ Matches: {results['matches']}", fg=typer.colors.GREEN)
+            typer.secho(f"  ✗ Mismatches: {results['mismatches']}", fg=typer.colors.RED)
+            typer.secho(f"  📄 CSV only: {results['csv_only']}", fg=typer.colors.BLUE)
+            typer.secho(
+                f"  🗺  Spatial only: {results['spatial_only']}",
+                fg=typer.colors.MAGENTA,
+            )
+
+            # Show mismatch details
+            if results["details"]:
+                typer.secho("\n⚠ Mismatch Details:", fg=typer.colors.YELLOW, bold=True)
+                for detail in results["details"][:10]:  # Limit to 10
+                    typer.secho(
+                        f"  {detail['district_type']} {detail['district_id']}:",
+                        fg=typer.colors.WHITE,
+                    )
+                    typer.secho(
+                        f"    CSV: {', '.join(detail['csv_counties'])}",
+                        fg=typer.colors.BLUE,
+                    )
+                    typer.secho(
+                        f"    Spatial: {', '.join(detail['spatial_counties'])}",
+                        fg=typer.colors.MAGENTA,
+                    )
+                if len(results["details"]) > 10:
+                    typer.secho(
+                        f"  ... and {len(results['details']) - 10} more mismatches",
+                        fg=typer.colors.YELLOW,
+                    )
+
+        # CSV mode
+        elif csv_file:
+            typer.secho(
+                f"⚙ Linking districts to counties from CSV: {csv_file}",
+                fg=typer.colors.CYAN,
+            )
+            stats = link_districts_from_csv(session, csv_file, overwrite=overwrite)
+
+            typer.secho("\n✓ CSV linking completed!", fg=typer.colors.GREEN, bold=True)
+            typer.secho(f"  Updated: {stats['updated']}", fg=typer.colors.GREEN)
+            typer.secho(f"  Skipped: {stats['skipped']}", fg=typer.colors.YELLOW)
+            typer.secho(f"  Not found: {stats['not_found']}", fg=typer.colors.RED)
+            typer.secho(f"  Errors: {stats['errors']}", fg=typer.colors.RED)
+
+        # Spatial mode
+        elif spatial:
+            typer.secho(
+                "⚙ Linking districts to counties using spatial joins...",
+                fg=typer.colors.CYAN,
+            )
+            stats = link_districts_spatial(
+                session,
+                district_type=district_type,
+                state_fips=state_fips,
+                overwrite=overwrite,
+            )
+
+            typer.secho("\n✓ Spatial linking completed!", fg=typer.colors.GREEN, bold=True)
+            typer.secho(f"  Updated: {stats['updated']}", fg=typer.colors.GREEN)
+            typer.secho(f"  Skipped: {stats['skipped']}", fg=typer.colors.YELLOW)
+            typer.secho(f"  No overlap: {stats['no_overlap']}", fg=typer.colors.BLUE)
+            typer.secho(f"  Errors: {stats['errors']}", fg=typer.colors.RED)
+
+        # Next steps
+        typer.secho(
+            "\n💡 Next steps:",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+        typer.secho(
+            "  1. Open QGIS and connect to your PostGIS database",
+            fg=typer.colors.WHITE,
+        )
+        typer.secho("  2. Load the district_boundaries layer", fg=typer.colors.WHITE)
+        typer.secho(
+            "  3. Filter by: district_type = 'congressional' AND county_name LIKE '%BIBB%'",
+            fg=typer.colors.WHITE,
+        )
+
+    except Exception as e:
+        session.close()
+        engine.dispose()
+        logger.exception("link-districts-to-counties failed with error: {}", e)
+        typer.secho(f"✗ Error: {e}", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(code=1)
+
+    finally:
+        session.close()
+        engine.dispose()
 
 
 @app.command()

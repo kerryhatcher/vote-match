@@ -25,6 +25,7 @@ Base = declarative_base()
 # Used by import-geojson and compare-districts to look up a voter's
 # registered district value for any given district type.
 DISTRICT_TYPES: dict[str, str] = {
+    "county": "county",
     "county_precinct": "county_precinct",
     "congressional": "congressional_district",
     "state_senate": "state_senate_district",
@@ -401,12 +402,17 @@ class DistrictBoundary(Base):
     # Arbitrary extra properties from the source GeoJSON
     extra_properties = Column(JSON, nullable=True)
 
+    # County name(s) this district overlaps (for filtering in QGIS)
+    # Can be comma-separated for districts spanning multiple counties
+    county_name = Column(String(100), nullable=True)
+
     # PostGIS geometry (GEOMETRY to accept both POLYGON and MULTIPOLYGON)
     geom = Column(Geometry("GEOMETRY", srid=4326), nullable=False)
 
     __table_args__ = (
         UniqueConstraint("district_type", "district_id", name="uq_district_type_id"),
         Index("idx_district_boundary_type", "district_type"),
+        Index("idx_district_boundary_county", "county_name"),
         Index("idx_district_boundary_geom", "geom", postgresql_using="gist"),
     )
 

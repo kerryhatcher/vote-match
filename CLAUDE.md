@@ -171,6 +171,7 @@ Vote Match supports importing and comparing district boundaries for spatial anal
 
 The following district types are supported (see `DISTRICT_TYPES` in `models.py`):
 
+- **county** - County Boundaries (for filtering districts by county)
 - **congressional** - US Congressional Districts
 - **state_senate** - State Senate Districts
 - **state_house** - State House/Assembly Districts
@@ -243,6 +244,75 @@ vote-match compare-districts --district-type congressional --district-type state
 # Export comparison results
 vote-match compare-districts --district-type congressional --export mismatches.csv
 ```
+
+### County-Based Filtering
+
+Vote Match supports filtering districts by county in QGIS. This enables spatial analysis and visualization of districts within specific counties.
+
+**Workflow:**
+
+1. **Import county boundaries** (one-time setup):
+
+   ```bash
+   vote-match import-geojson data/tl_2025_us_county.zip --district-type county
+   ```
+
+   This imports ~3,200 US county boundaries from Census TIGER/Line shapefiles.
+
+2. **Link districts to counties**:
+
+   **Option A: Use CSV mapping (Georgia only, authoritative)**
+
+   ```bash
+   vote-match link-districts-to-counties data/counties-by-districts-2023.csv
+   ```
+
+   Uses official Georgia state mappings for congressional, state senate, and state house districts.
+
+   **Option B: Use spatial joins (any state, automatic)**
+
+   ```bash
+   # Link all district types
+   vote-match link-districts-to-counties --spatial
+
+   # Link specific district type
+   vote-match link-districts-to-counties --spatial --district-type congressional
+
+   # Filter to Georgia counties only
+   vote-match link-districts-to-counties --spatial --state-fips 13
+   ```
+
+   Uses PostGIS `ST_Intersects` to automatically determine which counties overlap which districts.
+
+3. **Validate mappings** (optional):
+
+   ```bash
+   vote-match link-districts-to-counties --validate data/counties-by-districts-2023.csv
+   ```
+
+   Compares CSV mappings vs spatial joins to identify mismatches.
+
+**QGIS Filtering Examples:**
+
+Once districts are linked to counties, you can filter in QGIS using the `county_name` attribute:
+
+```sql
+-- Show congressional districts in Bibb County
+"district_type" = 'congressional' AND "county_name" LIKE '%BIBB%'
+
+-- Show all districts in multiple counties
+"county_name" LIKE '%BIBB%' OR "county_name" LIKE '%MONROE%'
+
+-- Show districts entirely within a single county (not spanning multiple)
+"county_name" = 'BIBB'
+```
+
+**Notes:**
+
+- Many Georgia districts span multiple counties - their `county_name` contains comma-separated values (e.g., "BIBB, MONROE, JONES")
+- County names are normalized to uppercase without "County" suffix
+- CSV provides authoritative mappings for Georgia; spatial joins work nationwide
+- Use `--overwrite` flag to update existing county associations
 
 ### QGIS Visualization
 
