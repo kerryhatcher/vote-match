@@ -14,10 +14,55 @@ from sqlalchemy.orm import Session
 from vote_match.config import Settings
 from vote_match.geocoder import GeocodeResult, build_batch_csv, parse_response, submit_batch
 from vote_match.geocoding.base import GeocodeService, StandardGeocodeResult
-from vote_match.models import CountyCommissionDistrict
+from vote_match.models import (
+    DISTRICT_TYPES,
+    CountyCommissionDistrict,
+    DistrictBoundary,
+    VoterDistrictAssignment,
+)
 from vote_match.models import GeocodeResult as GeocodeResultModel
 from vote_match.models import Voter
 from vote_match.usps_validator import USPSValidationResult, validate_batch
+
+
+def normalize_district_id(value: str | None) -> str | None:
+    """Normalize district ID for comparison by stripping leading zeros.
+
+    This ensures "026", "26", and "0026" are treated as equivalent values.
+    Preserves "0" for actual zero values.
+
+    Args:
+        value: District ID value (may be None or empty)
+
+    Returns:
+        Normalized district ID with leading zeros removed, or None if input is None/empty
+
+    Examples:
+        >>> normalize_district_id("026")
+        "26"
+        >>> normalize_district_id("0")
+        "0"
+        >>> normalize_district_id("000")
+        "0"
+        >>> normalize_district_id(None)
+        None
+        >>> normalize_district_id("")
+        None
+    """
+    if not value or not value.strip():
+        return None
+
+    # Strip whitespace
+    normalized = value.strip()
+
+    # If it's all digits, strip leading zeros but preserve "0"
+    if normalized.isdigit():
+        # lstrip("0") would turn "000" into "", so we handle that case
+        stripped = normalized.lstrip("0")
+        return stripped if stripped else "0"
+
+    # For non-numeric values (e.g., "District 5A"), return as-is
+    return normalized
 
 
 def get_pending_voters(
@@ -1377,9 +1422,15 @@ def _get_voters_geojson(
     mismatch_only: bool = False,
     exact_match_only: bool = False,
     redact_pii: bool = False,
+    district_type: list[str] | None = None,
+    county: str | None = None,
 ) -> dict:
     """
     Query voters as GeoJSON using PostGIS ST_AsGeoJSON.
+
+    Uses a two-phase approach:
+    1. Build SQLAlchemy query with JOINs and filters to get voter IDs
+    2. Use voter IDs in PostGIS query for efficient GeoJSON conversion
 
     Args:
         session: SQLAlchemy session.
@@ -1388,66 +1439,144 @@ def _get_voters_geojson(
         mismatch_only: If True, only include voters with district mismatches.
         exact_match_only: If True, only include voters with exact geocode matches.
         redact_pii: If True, exclude PII fields (name, address, registration number).
+        district_type: Filter by specific district type(s) when mismatch_only is True.
+        county: Filter by county name (normalized to uppercase).
 
     Returns:
         GeoJSON FeatureCollection dict.
     """
     logger.info("Querying voters for GeoJSON export...")
 
+    # Phase 1: Build SQLAlchemy query to filter voters
+    from vote_match.models import Voter, VoterDistrictAssignment
+    from sqlalchemy import select
+
+    query = select(Voter.voter_registration_number).filter(Voter.geom.isnot(None))
+
+    if matched_only:
+        query = query.filter(Voter.geocode_status.in_(["exact", "interpolated", "approximate"]))
+
+    if mismatch_only:
+        if district_type:
+            # Filter by specific district type(s) using JOIN
+            query = (
+                query.join(
+                    VoterDistrictAssignment,
+                    Voter.voter_registration_number == VoterDistrictAssignment.voter_id,
+                )
+                .filter(
+                    VoterDistrictAssignment.district_type.in_(district_type),
+                    VoterDistrictAssignment.is_mismatch,
+                )
+                .distinct()
+            )
+        else:
+            # No specific type: use legacy field (any mismatch)
+            query = query.filter(Voter.district_mismatch)
+
+    if exact_match_only:
+        query = query.filter(Voter.geocode_match_type == "exact")
+
+    if county:
+        # Normalize county name to uppercase for consistent matching
+        normalized_county = county.strip().upper()
+        query = query.filter(Voter.county == normalized_county)
+
+    if limit:
+        query = query.limit(limit)
+
+    # Execute query to get filtered voter IDs
+    result = session.execute(query)
+    voter_ids = [row[0] for row in result.fetchall()]
+
+    logger.info(f"Filtered to {len(voter_ids)} voters")
+
+    # If no voters match, return empty GeoJSON
+    if not voter_ids:
+        return {"type": "FeatureCollection", "features": []}
+
+    # Phase 2: Use voter IDs in PostGIS query for efficient GeoJSON conversion
+    # Determine which district field to select based on district_type parameter
+    # This is used for coloring voter markers on the map
+    if district_type and len(district_type) > 0:
+        # Use the first district type for coloring (maps typically show one district type)
+        district_column = DISTRICT_TYPES.get(district_type[0], "county_commission_district")
+    else:
+        # Default to county_commission_district for backward compatibility
+        district_column = "county_commission_district"
+
     # Build query with PostGIS ST_AsGeoJSON for direct geometry conversion
+    # When district_type is specified, JOIN voter_district_assignments to get the
+    # correct per-type spatial_district_id and is_mismatch instead of legacy voter columns
+    use_vda_join = bool(district_type and len(district_type) > 0)
+
+    if use_vda_join:
+        vda_join = """
+            LEFT JOIN voter_district_assignments vda
+                ON vda.voter_id = v.voter_registration_number
+                AND vda.district_type = :district_type"""
+        spatial_col = "vda.spatial_district_id"
+        mismatch_col = "vda.is_mismatch as district_mismatch"
+        from_clause = "FROM voters v"
+        where_clause = "WHERE v.voter_registration_number = ANY(:voter_ids)"
+        order_clause = "ORDER BY v.voter_registration_number"
+    else:
+        vda_join = ""
+        spatial_col = "spatial_district_id"
+        mismatch_col = "district_mismatch"
+        from_clause = "FROM voters v"
+        where_clause = "WHERE v.voter_registration_number = ANY(:voter_ids)"
+        order_clause = "ORDER BY v.voter_registration_number"
+
     if redact_pii:
         # Minimal query - no PII fields
-        query_sql = """
+        query_sql = f"""
             SELECT
-                county_commission_district,
-                spatial_district_id,
-                district_mismatch,
-                geocode_status,
-                geocode_match_type,
-                ST_AsGeoJSON(geom)::json as geometry
-            FROM voters
-            WHERE geom IS NOT NULL
+                v.{district_column} as registered_district,
+                v.county_commission_district,
+                {spatial_col},
+                {mismatch_col},
+                v.geocode_status,
+                v.geocode_match_type,
+                ST_AsGeoJSON(v.geom)::json as geometry
+            {from_clause}
+            {vda_join}
+            {where_clause}
+            {order_clause}
         """
     else:
         # Full query with PII
-        query_sql = """
+        query_sql = f"""
             SELECT
-                voter_registration_number,
-                COALESCE(first_name || ' ' || last_name, 'Unknown') as full_name,
+                v.voter_registration_number,
+                COALESCE(v.first_name || ' ' || v.last_name, 'Unknown') as full_name,
                 COALESCE(
-                    residence_street_number || ' ' ||
-                    COALESCE(residence_pre_direction || ' ', '') ||
-                    residence_street_name || ' ' ||
-                    COALESCE(residence_street_type, ''),
+                    v.residence_street_number || ' ' ||
+                    COALESCE(v.residence_pre_direction || ' ', '') ||
+                    v.residence_street_name || ' ' ||
+                    COALESCE(v.residence_street_type, ''),
                     'Unknown'
                 ) as street_address,
-                residence_city,
-                status,
-                county_commission_district,
-                spatial_district_id,
-                district_mismatch,
-                geocode_status,
-                geocode_match_type,
-                ST_AsGeoJSON(geom)::json as geometry
-            FROM voters
-            WHERE geom IS NOT NULL
+                v.residence_city,
+                v.status,
+                v.{district_column} as registered_district,
+                v.county_commission_district,
+                {spatial_col},
+                {mismatch_col},
+                v.geocode_status,
+                v.geocode_match_type,
+                ST_AsGeoJSON(v.geom)::json as geometry
+            {from_clause}
+            {vda_join}
+            {where_clause}
+            {order_clause}
         """
 
-    if matched_only:
-        query_sql += " AND geocode_status IN ('exact', 'interpolated', 'approximate')"
+    query_params = {"voter_ids": voter_ids}
+    if use_vda_join:
+        query_params["district_type"] = district_type[0]
 
-    if mismatch_only:
-        query_sql += " AND district_mismatch = true"
-
-    if exact_match_only:
-        query_sql += " AND geocode_match_type = 'exact'"
-
-    query_sql += " ORDER BY voter_registration_number"
-
-    if limit:
-        query_sql += f" LIMIT {limit}"
-
-    result = session.execute(text(query_sql))
+    result = session.execute(text(query_sql), query_params)
     rows = result.fetchall()
 
     # Build GeoJSON FeatureCollection
@@ -1459,6 +1588,7 @@ def _get_voters_geojson(
                 "type": "Feature",
                 "geometry": row.geometry,
                 "properties": {
+                    "registered_district": row.registered_district,
                     "county_commission_district": row.county_commission_district,
                     "spatial_district_id": row.spatial_district_id,
                     "district_mismatch": row.district_mismatch,
@@ -1477,6 +1607,7 @@ def _get_voters_geojson(
                     "street_address": row.street_address,
                     "residence_city": row.residence_city,
                     "status": row.status,
+                    "registered_district": row.registered_district,
                     "county_commission_district": row.county_commission_district,
                     "spatial_district_id": row.spatial_district_id,
                     "district_mismatch": row.district_mismatch,
@@ -1496,27 +1627,38 @@ def _get_voters_geojson(
 
 def _get_districts_geojson(
     session: Session,
+    district_type: str = "county_commission",
     mismatch_only: bool = False,
     exact_match_only: bool = False,
+    county: str | None = None,
 ) -> dict:
     """
-    Query county commission districts as GeoJSON using PostGIS ST_AsGeoJSON.
+    Query districts as GeoJSON for any district type using PostGIS ST_AsGeoJSON.
 
     Args:
-        session: SQLAlchemy session.
-        mismatch_only: If True, only count mismatches for voters with district mismatches.
-        exact_match_only: If True, only count mismatches for voters with exact geocode matches.
+        session: SQLAlchemy session
+        district_type: District type key from DISTRICT_TYPES (e.g., 'state_senate', 'congressional')
+        mismatch_only: If True, only count voters with district mismatches
+        exact_match_only: If True, only count voters with exact geocode matches
+        county: Filter by county name (normalized to uppercase). Uses LIKE matching
+                for multi-county districts (e.g., "BIBB, MONROE").
 
     Returns:
         GeoJSON FeatureCollection dict with properties:
-            - voter_count: Total voters in district (unfiltered)
+            - voter_count: Total voters in district (by spatial join)
             - registered_elsewhere_count: Voters registered elsewhere but living here (filtered)
             - registered_here_elsewhere_count: Voters registered here but living elsewhere (filtered)
     """
+    from vote_match.models import DISTRICT_TYPES
+
     logger.info(
-        f"Querying districts for GeoJSON export (mismatch_only={mismatch_only}, "
-        f"exact_match_only={exact_match_only})..."
+        f"Querying {district_type} districts for GeoJSON export "
+        f"(mismatch_only={mismatch_only}, exact_match_only={exact_match_only})..."
     )
+
+    # Validate district type
+    if district_type not in DISTRICT_TYPES:
+        raise ValueError(f"Invalid district_type: {district_type}")
 
     # Build filter condition for mismatch counts
     filter_conditions = []
@@ -1527,9 +1669,18 @@ def _get_districts_geojson(
 
     filter_sql = " AND " + " AND ".join(filter_conditions) if filter_conditions else ""
 
-    # Build query with PostGIS ST_AsGeoJSON and voter counts
-    # voter_count: Unfiltered count of all voters in district
-    # registered_elsewhere_count & registered_here_elsewhere_count: Filtered by mismatch_only/exact_match_only
+    # Build county filter clause conditionally
+    county_filter_sql = ""
+    params = {"district_type": district_type}
+    if county:
+        normalized_county = county.strip().upper()
+        county_filter_sql = " AND d.county_name LIKE :county_pattern"
+        params["county_pattern"] = f"%{normalized_county}%"
+
+    # Build query using generic district_boundaries table and voter_district_assignments
+    # voter_count: Total voters spatially located in this district
+    # registered_elsewhere_count: Voters living here but registered elsewhere (mismatch = true)
+    # Note: We only JOIN on spatial_district_id to avoid cartesian products
     query_sql = f"""
         SELECT
             d.district_id,
@@ -1537,34 +1688,27 @@ def _get_districts_geojson(
             d.rep_name as representative_name,
             d.party,
             d.email as contact_email,
-            d.district_url as website,
+            d.website_url as website,
             ST_AsGeoJSON(d.geom)::json as geometry,
-            COUNT(CASE WHEN v.spatial_district_id = d.district_id THEN 1 END) as voter_count,
-            COUNT(CASE
-                WHEN v.spatial_district_id = d.district_id
-                    AND v.county_commission_district IS NOT NULL
-                    AND REPLACE(REPLACE(LOWER(v.county_commission_district), 'district', ''), ' ', '') != LOWER(TRIM(d.district_id))
+            COUNT(DISTINCT CASE WHEN vda.spatial_district_id = d.district_id THEN vda.voter_id END) as voter_count,
+            COUNT(DISTINCT CASE
+                WHEN vda.spatial_district_id = d.district_id
+                    AND vda.is_mismatch = true
                     {filter_sql}
-                THEN 1
+                THEN vda.voter_id
             END) as registered_elsewhere_count,
-            COUNT(CASE
-                WHEN v.county_commission_district IS NOT NULL
-                    AND REPLACE(REPLACE(LOWER(v.county_commission_district), 'district', ''), ' ', '') = LOWER(TRIM(d.district_id))
-                    AND (v.spatial_district_id IS NULL OR v.spatial_district_id != d.district_id)
-                    {filter_sql}
-                THEN 1
-            END) as registered_here_elsewhere_count
-        FROM county_commission_districts d
-        LEFT JOIN voters v ON (v.spatial_district_id = d.district_id OR (
-            v.county_commission_district IS NOT NULL
-            AND REPLACE(REPLACE(LOWER(v.county_commission_district), 'district', ''), ' ', '') = LOWER(TRIM(d.district_id))
-        )) AND v.geom IS NOT NULL
-        GROUP BY d.district_id, d.name, d.rep_name, d.party,
-                 d.email, d.district_url, d.geom
+            0 as registered_here_elsewhere_count
+        FROM district_boundaries d
+        LEFT JOIN voter_district_assignments vda
+            ON vda.district_type = :district_type
+            AND vda.spatial_district_id = d.district_id
+        LEFT JOIN voters v ON v.voter_registration_number = vda.voter_id AND v.geom IS NOT NULL
+        WHERE d.district_type = :district_type{county_filter_sql}
+        GROUP BY d.district_id, d.name, d.rep_name, d.party, d.email, d.website_url, d.geom
         ORDER BY d.district_id
     """
 
-    result = session.execute(text(query_sql))
+    result = session.execute(text(query_sql), params)
     rows = result.fetchall()
 
     # Build GeoJSON FeatureCollection
@@ -1593,6 +1737,63 @@ def _get_districts_geojson(
         "type": "FeatureCollection",
         "features": features,
     }
+
+
+def _get_county_boundary_geojson(
+    session: Session,
+    county: str,
+    state_fips: str | None = None,
+) -> dict:
+    """
+    Query a single county boundary as GeoJSON for map overlay.
+
+    Args:
+        session: SQLAlchemy session.
+        county: County name (normalized to uppercase) to look up.
+        state_fips: State FIPS code to filter by (e.g., "13" for Georgia).
+
+    Returns:
+        GeoJSON FeatureCollection dict (0 or 1 features).
+    """
+    logger.info(f"Querying county boundary for '{county}' (state_fips={state_fips})...")
+
+    normalized_county = county.strip().upper()
+
+    state_filter_sql = ""
+    params: dict = {"county_pattern": f"%{normalized_county}%"}
+    if state_fips:
+        state_filter_sql = " AND d.extra_properties->>'STATEFP' = :state_fips"
+        params["state_fips"] = state_fips
+
+    query_sql = f"""
+        SELECT
+            d.district_id,
+            d.name as county_name,
+            ST_AsGeoJSON(d.geom)::json as geometry
+        FROM district_boundaries d
+        WHERE d.district_type = 'county'
+          AND UPPER(d.name) LIKE :county_pattern{state_filter_sql}
+        LIMIT 1
+    """
+
+    result = session.execute(text(query_sql), params)
+    row = result.fetchone()
+
+    if not row:
+        logger.warning(f"No county boundary found for '{county}'")
+        return {"type": "FeatureCollection", "features": []}
+
+    feature = {
+        "type": "Feature",
+        "geometry": row.geometry,
+        "properties": {
+            "district_id": row.district_id,
+            "county_name": row.county_name,
+        },
+    }
+
+    logger.info(f"Found county boundary: {row.county_name}")
+    return {"type": "FeatureCollection", "features": [feature]}
 
 
 def _calculate_map_bounds(voters_geojson: dict, districts_geojson: dict) -> list:
@@ -1660,6 +1861,8 @@ def generate_leaflet_map(
     html_filename: str = "index.html",
     settings: Settings | None = None,
     redact_pii: bool = False,
+    district_type: str | None = None,
+    county: str | None = None,
 ) -> str:
     """
     Generate an interactive Leaflet map with separate GeoJSON files.
@@ -1681,6 +1884,9 @@ def generate_leaflet_map(
         html_filename: Name of the HTML file to create (default: index.html).
         settings: Settings object (optional).
         redact_pii: If True, exclude PII fields from voter data.
+        district_type: District type to display (e.g., 'state_senate', 'congressional').
+                      Defaults to 'county_commission' if None.
+        county: Filter by county name (normalized to uppercase).
 
     Returns:
         Path to the generated index.html file, or HTML string if output_path is None.
@@ -1697,6 +1903,9 @@ def generate_leaflet_map(
     )
 
     # Query data as GeoJSON
+    # Convert single district_type to list for _get_voters_geojson
+    district_type_list = [district_type] if district_type else None
+
     voters_geojson = _get_voters_geojson(
         session,
         limit=limit,
@@ -1704,18 +1913,42 @@ def generate_leaflet_map(
         mismatch_only=mismatch_only,
         exact_match_only=exact_match_only,
         redact_pii=redact_pii,
+        district_type=district_type_list,
+        county=county,
     )
 
     districts_geojson = {"type": "FeatureCollection", "features": []}
     if include_districts:
         districts_geojson = _get_districts_geojson(
             session,
+            district_type=district_type or "county_commission",
             mismatch_only=mismatch_only,
             exact_match_only=exact_match_only,
+            county=county,
         )
 
+    # Query county boundary when filtering by a single county
+    county_geojson = {"type": "FeatureCollection", "features": []}
+    if county:
+        # Infer state FIPS from geocode results to disambiguate counties with the same name
+        state_fips = session.execute(
+            text(
+                "SELECT gr.raw_response->>'state_fips'"
+                " FROM geocode_results gr"
+                " JOIN voters v ON v.voter_registration_number = gr.voter_id"
+                " WHERE v.county = :county AND gr.raw_response->>'state_fips' IS NOT NULL"
+                " LIMIT 1"
+            ),
+            {"county": county.strip().upper()},
+        ).scalar()
+        county_geojson = _get_county_boundary_geojson(session, county, state_fips=state_fips)
+
     # Calculate map bounds
-    bounds = _calculate_map_bounds(voters_geojson, districts_geojson)
+    # When filtering by county, use county boundary for bounds (districts may extend far beyond)
+    if county_geojson.get("features"):
+        bounds = _calculate_map_bounds(voters_geojson, county_geojson)
+    else:
+        bounds = _calculate_map_bounds(voters_geojson, districts_geojson)
 
     # If output_path is provided, create web folder structure
     if output_path:
@@ -1740,6 +1973,16 @@ def generate_leaflet_map(
             districts_path = web_dir / districts_filename
             districts_path.write_text(districts_json)
             logger.info(f"Saved districts GeoJSON: {districts_path}")
+
+        # Generate county boundary GeoJSON with checksum (if applicable)
+        county_filename = None
+        if county_geojson["features"]:
+            county_json = json.dumps(county_geojson, separators=(",", ":"))
+            county_hash = hashlib.sha256(county_json.encode()).hexdigest()[:8]
+            county_filename = f"county.{county_hash}.geojson"
+            county_path = web_dir / county_filename
+            county_path.write_text(county_json)
+            logger.info(f"Saved county GeoJSON: {county_path}")
 
         # Load async HTML template
         template_path = Path(__file__).parent / "templates" / "leaflet_map_async.html"
@@ -1774,6 +2017,8 @@ def generate_leaflet_map(
         html = html.replace("fetch('voters.geojson')", f"fetch('{voters_filename}')")
         if districts_filename:
             html = html.replace("fetch('districts.geojson')", f"fetch('{districts_filename}')")
+        if county_filename:
+            html = html.replace("fetch('county.geojson')", f"fetch('{county_filename}')")
 
         # Save HTML
         index_path = web_dir / html_filename
@@ -1796,6 +2041,7 @@ def generate_leaflet_map(
         html = template_content.replace("{{ title }}", title)
         html = html.replace("{{ voters_geojson }}", json.dumps(voters_geojson))
         html = html.replace("{{ districts_geojson }}", json.dumps(districts_geojson))
+        html = html.replace("{{ county_geojson }}", json.dumps(county_geojson))
         html = html.replace("{{ bounds }}", json.dumps(bounds))
         # Clustering configuration
         html = html.replace("{{ enable_clustering }}", str(settings.map_enable_clustering).lower())
@@ -1817,3 +2063,687 @@ def generate_leaflet_map(
 
         logger.info("Leaflet map HTML generated successfully")
         return html
+
+
+# ---------------------------------------------------------------------------
+# Generalized district boundary import / comparison
+# ---------------------------------------------------------------------------
+
+# Common property-name patterns for auto-detection of district ID and name
+_ID_CANDIDATES = [
+    "DISTRICTID",
+    "District",
+    "DISTRICT",
+    "district_id",
+    "DistrictID",
+    "ID",
+    "id",
+    "GEOID",
+    "CODE",
+    "DIST_NUM",
+    "DIST_NO",
+    "DIST",
+    "Dist",
+    "OBJECTID",
+]
+_NAME_CANDIDATES = [
+    "NAME",
+    "Name",
+    "name",
+    "NAMELSAD",
+    "DISTRICT_NAME",
+    "DistrictName",
+    "LABEL",
+    "Label",
+    "DESCRIP",
+    "Descrip",
+    "SHORTLABEL",
+    "ShortLabel",
+]
+
+
+def _read_boundary_features(file_path: Path) -> list[dict]:
+    """Read district boundary features from GeoJSON, shapefile, or zip archive.
+
+    Supports:
+    - .geojson / .json files (GeoJSON FeatureCollection)
+    - .shp files (ESRI Shapefile)
+    - .zip files containing shapefiles (auto-detects .shp inside)
+
+    All formats are normalized to a list of GeoJSON-style feature dicts with
+    ``properties`` (dict) and ``geometry`` (dict) keys.
+
+    Args:
+        file_path: Path to the boundary file
+
+    Returns:
+        List of feature dicts, each with ``properties`` and ``geometry``.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        ValueError: If the format is unsupported or contains no features
+    """
+    import geopandas as gpd
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    suffix = file_path.suffix.lower()
+
+    if suffix in (".geojson", ".json"):
+        # Pure GeoJSON path – load directly for full fidelity
+        with open(file_path) as f:
+            geojson_data = json.load(f)
+
+        if geojson_data.get("type") != "FeatureCollection":
+            raise ValueError(
+                f"Invalid GeoJSON: expected FeatureCollection, got {geojson_data.get('type')}"
+            )
+        features = geojson_data.get("features", [])
+        if not features:
+            raise ValueError("No features found in GeoJSON file")
+        logger.info(f"Read {len(features)} features from GeoJSON")
+        return features
+
+    if suffix == ".zip":
+        # Read shapefile inside the zip via geopandas
+        gdf = _read_shapefile_zip(file_path)
+    elif suffix == ".shp":
+        logger.info(f"Reading shapefile: {file_path}")
+        gdf = gpd.read_file(file_path)
+    else:
+        raise ValueError(
+            f"Unsupported file format '{suffix}'. Supported: .geojson, .json, .shp, .zip"
+        )
+
+    if gdf.empty:
+        raise ValueError("No features found in file")
+
+    # Reproject to EPSG:4326 (WGS84) if needed
+    if gdf.crs and gdf.crs.to_epsg() != 4326:
+        logger.info(f"Reprojecting from {gdf.crs} to EPSG:4326")
+        gdf = gdf.to_crs(epsg=4326)
+
+    # Convert to GeoJSON feature list
+    features = json.loads(gdf.to_json()).get("features", [])
+    logger.info(f"Read {len(features)} features from {suffix} file")
+    return features
+
+
+def _read_shapefile_zip(zip_path: Path):
+    """Read the first .shp file found inside a zip archive.
+
+    Args:
+        zip_path: Path to the .zip file
+
+    Returns:
+        GeoDataFrame
+
+    Raises:
+        ValueError: If no .shp file is found in the archive
+    """
+    import geopandas as gpd
+    import zipfile
+
+    logger.info(f"Scanning zip archive: {zip_path}")
+
+    with zipfile.ZipFile(zip_path) as zf:
+        shp_names = [n for n in zf.namelist() if n.lower().endswith(".shp")]
+
+    if not shp_names:
+        raise ValueError(f"No .shp file found inside {zip_path.name}")
+
+    # Use the first .shp found (most zip archives contain exactly one)
+    shp_name = shp_names[0]
+    logger.info(f"Found shapefile in zip: {shp_name}")
+
+    # geopandas can read directly from zip:// URI
+    uri = f"zip://{zip_path}!{shp_name}"
+    return gpd.read_file(uri)
+
+
+def _log_detected_properties(features: list[dict]) -> None:
+    """Log the property keys found in the first feature for debugging."""
+    if features:
+        props = features[0].get("properties", {})
+        logger.info(f"Available properties: {list(props.keys())}")
+        # Log first feature values for easier debugging
+        for k, v in props.items():
+            logger.debug(f"  {k} = {v!r}")
+
+
+def import_district_boundaries(
+    session: Session,
+    file_path: Path,
+    district_type: str,
+    clear_existing: bool = False,
+    id_property: str | None = None,
+    name_property: str | None = None,
+) -> dict[str, int]:
+    """Import district boundaries from GeoJSON, shapefile, or zip for any district type.
+
+    Supports .geojson, .json, .shp, and .zip (containing shapefiles).
+    Shapefiles are automatically reprojected to EPSG:4326 if needed.
+
+    Args:
+        session: Database session
+        file_path: Path to boundary file (.geojson, .shp, or .zip)
+        district_type: Key from DISTRICT_TYPES (e.g., "congressional")
+        clear_existing: Delete existing boundaries for this type first
+        id_property: Property key for the district ID (auto-detected if omitted)
+        name_property: Property key for the district name (auto-detected if omitted)
+
+    Returns:
+        Dictionary with statistics: total, success, failed, skipped
+    """
+    if district_type not in DISTRICT_TYPES:
+        raise ValueError(
+            f"Unknown district type '{district_type}'. "
+            f"Valid types: {', '.join(sorted(DISTRICT_TYPES))}"
+        )
+
+    logger.info(f"Importing {district_type} boundaries from {file_path}")
+
+    # Clear existing boundaries for this district type if requested
+    if clear_existing:
+        count = (
+            session.query(DistrictBoundary)
+            .filter(DistrictBoundary.district_type == district_type)
+            .count()
+        )
+        if count > 0:
+            logger.info(f"Clearing {count} existing {district_type} boundaries...")
+            session.query(DistrictBoundary).filter(
+                DistrictBoundary.district_type == district_type
+            ).delete()
+            session.commit()
+
+    # Read features from any supported format
+    features = _read_boundary_features(file_path)
+    _log_detected_properties(features)
+
+    logger.info(f"Found {len(features)} features to import")
+
+    stats: dict[str, int] = {"total": len(features), "success": 0, "failed": 0, "skipped": 0}
+
+    # Prefetch existing district IDs to avoid N+1 queries
+    existing_ids_stmt = (
+        session.query(DistrictBoundary.district_id)
+        .filter(DistrictBoundary.district_type == district_type)
+        .all()
+    )
+    existing_district_ids = {row[0] for row in existing_ids_stmt}
+    logger.debug(
+        f"Found {len(existing_district_ids)} existing {district_type} districts in database"
+    )
+
+    for idx, feature in enumerate(features, 1):
+        try:
+            props = feature.get("properties", {})
+            geometry = feature.get("geometry")
+
+            if not geometry:
+                logger.warning(f"Feature {idx}: Missing geometry, skipping")
+                stats["skipped"] += 1
+                continue
+
+            # Resolve district_id
+            did = None
+            if id_property:
+                did = props.get(id_property)
+            else:
+                for cand in _ID_CANDIDATES:
+                    did = props.get(cand)
+                    if did is not None:
+                        break
+
+            # Resolve name
+            dname = None
+            if name_property:
+                dname = props.get(name_property)
+            else:
+                for cand in _NAME_CANDIDATES:
+                    dname = props.get(cand)
+                    if dname is not None:
+                        break
+
+            if did is None:
+                logger.warning(f"Feature {idx}: Could not find district ID property, skipping")
+                stats["skipped"] += 1
+                continue
+
+            did = str(did).strip()
+            if not dname:
+                dname = f"{district_type} {did}"
+
+            # Check for duplicates using prefetched set
+            if did in existing_district_ids:
+                logger.debug(f"District {district_type}/{did} already exists, skipping")
+                stats["skipped"] += 1
+                continue
+
+            # Convert GeoJSON geometry to PostGIS
+            shapely_geom = shape(geometry)
+            wkt = shapely_geom.wkt
+            geom = WKTElement(wkt, srid=4326)
+
+            # Collect optional representative metadata
+            rep_name = props.get("REPNAME1") or props.get("Commissioner") or props.get("rep_name")
+            party = props.get("PARTY1") or props.get("Party") or props.get("party")
+            email = props.get("Email") or props.get("E_Mail") or props.get("email")
+            website = (
+                props.get("DISTRICTURL1") or props.get("District_URL") or props.get("website_url")
+            )
+            photo = props.get("Photo") or props.get("Photo_URL") or props.get("photo_url")
+
+            # Store remaining properties as extra
+            known_keys = (
+                {
+                    id_property,
+                    name_property,
+                    "REPNAME1",
+                    "Commissioner",
+                    "rep_name",
+                    "PARTY1",
+                    "Party",
+                    "party",
+                    "Email",
+                    "E_Mail",
+                    "email",
+                    "DISTRICTURL1",
+                    "District_URL",
+                    "website_url",
+                    "Photo",
+                    "Photo_URL",
+                    "photo_url",
+                }
+                | set(_ID_CANDIDATES)
+                | set(_NAME_CANDIDATES)
+            )
+            extra = {k: v for k, v in props.items() if k not in known_keys}
+
+            boundary = DistrictBoundary(
+                district_type=district_type,
+                district_id=did,
+                name=str(dname),
+                rep_name=rep_name,
+                party=party,
+                email=email,
+                website_url=website,
+                photo_url=photo,
+                extra_properties=extra if extra else None,
+                geom=geom,
+            )
+            session.add(boundary)
+            stats["success"] += 1
+
+            if stats["success"] % 100 == 0:
+                logger.info(f"Progress: {stats['success']}/{len(features)} boundaries imported...")
+
+        except Exception as e:
+            logger.warning(f"Feature {idx}: Failed to import - {e}")
+            stats["failed"] += 1
+
+    session.commit()
+
+    logger.info(
+        f"Import complete: {stats['success']} imported, "
+        f"{stats['skipped']} skipped, {stats['failed']} failed"
+    )
+    return stats
+
+
+def compare_all_districts(
+    session: Session,
+    district_types: list[str] | None = None,
+    limit: int | None = None,
+    save_to_db: bool = False,
+) -> dict[str, dict]:
+    """Compare voter registrations against spatial boundaries for multiple district types.
+
+    For each requested district type that has boundaries in the database, runs a
+    PostGIS spatial join to determine which boundary polygon contains each
+    voter's geocoded point, then compares against the voter-roll value.
+
+    Args:
+        session: Database session
+        district_types: List of district-type keys to compare.
+                        If None, compares all types that have boundaries.
+        limit: Optional limit on voters to process (for testing)
+        save_to_db: If True, persist results to voter_district_assignments
+
+    Returns:
+        Dict keyed by district_type with per-type stats:
+        {
+            "county_commission": {
+                "total": int, "matched": int, "mismatched": int,
+                "no_district": int, "no_registered": int
+            },
+            ...
+        }
+    """
+    from datetime import datetime
+
+    # Determine which types to compare based on available boundaries
+    available_stmt = session.query(DistrictBoundary.district_type).distinct().all()
+    available_types = {row[0] for row in available_stmt}
+
+    if not available_types:
+        logger.warning("No district boundaries found in database")
+        return {}
+
+    # Validate that available types are recognized
+    valid_available_types = available_types & set(DISTRICT_TYPES.keys())
+    invalid_types = available_types - set(DISTRICT_TYPES.keys())
+
+    if invalid_types:
+        logger.warning(
+            f"Found {len(invalid_types)} unknown district type(s) in database: "
+            f"{', '.join(sorted(invalid_types))}. These will be skipped. "
+            f"Valid types: {', '.join(sorted(DISTRICT_TYPES.keys()))}"
+        )
+
+    # Use validated types instead of raw available_types
+    available_types = valid_available_types
+
+    if district_types:
+        types_to_compare = [t for t in district_types if t in available_types]
+        missing = set(district_types) - available_types
+        if missing:
+            logger.warning(f"No boundaries found for: {', '.join(missing)}")
+    else:
+        types_to_compare = sorted(available_types)
+
+    if not types_to_compare:
+        logger.warning("No matching district types to compare")
+        return {}
+
+    logger.info(
+        f"Comparing {len(types_to_compare)} district type(s): {', '.join(types_to_compare)}"
+    )
+
+    results: dict[str, dict] = {}
+    comparison_time = datetime.now()
+
+    for dtype in types_to_compare:
+        voter_column = DISTRICT_TYPES[dtype]
+        logger.info(f"Comparing district type '{dtype}' (voter column: {voter_column})...")
+
+        # Spatial join query with DISTINCT ON to handle overlapping boundaries
+        query_sql = f"""
+            SELECT DISTINCT ON (v.voter_registration_number)
+                v.voter_registration_number,
+                v.{voter_column} AS registered_value,
+                d.district_id AS spatial_district_id,
+                d.name AS spatial_district_name
+            FROM voters v
+            LEFT JOIN district_boundaries d
+                ON d.district_type = :district_type
+                AND ST_Within(v.geom, d.geom)
+            WHERE v.geom IS NOT NULL
+            ORDER BY v.voter_registration_number, d.district_id ASC
+        """
+        if limit:
+            query_sql += " LIMIT :limit_val"
+            rows = session.execute(
+                text(query_sql), {"district_type": dtype, "limit_val": limit}
+            ).fetchall()
+        else:
+            rows = session.execute(text(query_sql), {"district_type": dtype}).fetchall()
+
+        stats = {
+            "total": len(rows),
+            "matched": 0,
+            "mismatched": 0,
+            "no_district": 0,
+            "no_registered": 0,
+        }
+
+        assignments: list[dict] = []
+
+        for row in rows:
+            voter_id = row[0]
+            registered = row[1]
+            spatial_id = row[2]
+            spatial_name = row[3]
+
+            if not spatial_id:
+                stats["no_district"] += 1
+                if save_to_db:
+                    assignments.append(
+                        {
+                            "voter_id": voter_id,
+                            "district_type": dtype,
+                            "registered_value": registered,
+                            "spatial_district_id": None,
+                            "spatial_district_name": None,
+                            "is_mismatch": None,
+                            "compared_at": comparison_time,
+                        }
+                    )
+                continue
+
+            if not registered:
+                stats["no_registered"] += 1
+                if save_to_db:
+                    assignments.append(
+                        {
+                            "voter_id": voter_id,
+                            "district_type": dtype,
+                            "registered_value": None,
+                            "spatial_district_id": spatial_id,
+                            "spatial_district_name": spatial_name,
+                            "is_mismatch": None,
+                            "compared_at": comparison_time,
+                        }
+                    )
+                continue
+
+            # Normalize for comparison: strip "District" prefix, whitespace, and leading zeros
+            reg_clean = registered.replace("District", "").replace("district", "").strip()
+            reg_norm = normalize_district_id(reg_clean)
+
+            spat_norm = normalize_district_id(spatial_id)
+
+            is_match = reg_norm == spat_norm
+            if is_match:
+                stats["matched"] += 1
+            else:
+                stats["mismatched"] += 1
+
+            if save_to_db:
+                assignments.append(
+                    {
+                        "voter_id": voter_id,
+                        "district_type": dtype,
+                        "registered_value": registered,
+                        "spatial_district_id": spatial_id,
+                        "spatial_district_name": spatial_name,
+                        "is_mismatch": not is_match,
+                        "compared_at": comparison_time,
+                    }
+                )
+
+        results[dtype] = stats
+
+        logger.info(
+            f"  {dtype}: {stats['matched']} matched, "
+            f"{stats['mismatched']} mismatched, "
+            f"{stats['no_district']} no boundary, "
+            f"{stats['no_registered']} no registration value"
+        )
+
+        # Persist results if requested
+        if save_to_db and assignments:
+            _save_district_assignments(session, dtype, assignments)
+
+    # Update legacy district_mismatch field after all districts are compared
+    if save_to_db:
+        _update_legacy_mismatch_field(session)
+
+    return results
+
+
+def _save_district_assignments(
+    session: Session,
+    district_type: str,
+    assignments: list[dict],
+) -> None:
+    """Upsert voter district assignment records for a single district type.
+
+    Args:
+        session: Database session
+        district_type: The district type being saved
+        assignments: List of assignment dicts
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    logger.info(f"Saving {len(assignments)} assignments for {district_type}...")
+
+    batch_size = 1000
+    for i in range(0, len(assignments), batch_size):
+        batch = assignments[i : i + batch_size]
+        stmt = pg_insert(VoterDistrictAssignment).values(batch)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_voter_district_type",
+            set_={
+                "registered_value": stmt.excluded.registered_value,
+                "spatial_district_id": stmt.excluded.spatial_district_id,
+                "spatial_district_name": stmt.excluded.spatial_district_name,
+                "is_mismatch": stmt.excluded.is_mismatch,
+                "compared_at": stmt.excluded.compared_at,
+            },
+        )
+        session.execute(stmt)
+
+    session.commit()
+    logger.info(f"Saved {len(assignments)} assignments for {district_type}")
+
+
+def _update_legacy_mismatch_field(session: Session) -> int:
+    """Update Voter.district_mismatch from VoterDistrictAssignment.
+
+    Sets district_mismatch = True if voter has ANY mismatch across ANY district type.
+    This maintains backward compatibility with existing QGIS projects and queries.
+
+    Returns:
+        Number of voters updated
+    """
+    from sqlalchemy import text
+
+    logger.info("Updating legacy Voter.district_mismatch field from VoterDistrictAssignment")
+
+    # Update using SQL for efficiency
+    update_sql = """
+        UPDATE voters
+        SET district_mismatch = subquery.has_mismatch,
+            district_compared_at = NOW()
+        FROM (
+            SELECT
+                voter_id,
+                BOOL_OR(is_mismatch) as has_mismatch
+            FROM voter_district_assignments
+            GROUP BY voter_id
+        ) as subquery
+        WHERE voters.voter_registration_number = subquery.voter_id
+    """
+
+    result = session.execute(text(update_sql))
+    session.commit()
+
+    updated_count = result.rowcount
+    logger.info(f"Updated district_mismatch for {updated_count} voters")
+
+    return updated_count
+
+
+def get_district_status(session: Session) -> dict[str, dict]:
+    """Return summary statistics for imported boundaries and comparison results.
+
+    Returns:
+        Dict keyed by district_type, each containing:
+        {
+            "boundaries": int,         # number of imported boundaries
+            "voters_compared": int,     # voters with comparison results
+            "matched": int,
+            "mismatched": int,
+            "no_district": int,
+            "no_registered": int,
+        }
+    """
+    # Count boundaries per type
+    boundary_counts = (
+        session.query(
+            DistrictBoundary.district_type,
+            func.count().label("cnt"),
+        )
+        .group_by(DistrictBoundary.district_type)
+        .all()
+    )
+    boundary_map = {row[0]: row[1] for row in boundary_counts}
+
+    # Count assignment results per type
+    assignment_stats = (
+        session.query(
+            VoterDistrictAssignment.district_type,
+            func.count().label("total"),
+            func.sum(case((VoterDistrictAssignment.is_mismatch == False, 1), else_=0)).label(  # noqa: E712
+                "matched"
+            ),
+            func.sum(case((VoterDistrictAssignment.is_mismatch == True, 1), else_=0)).label(  # noqa: E712
+                "mismatched"
+            ),
+            func.sum(
+                case(
+                    (
+                        VoterDistrictAssignment.is_mismatch.is_(None)
+                        & VoterDistrictAssignment.spatial_district_id.is_(None),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("no_district"),
+            func.sum(
+                case(
+                    (
+                        VoterDistrictAssignment.is_mismatch.is_(None)
+                        & VoterDistrictAssignment.spatial_district_id.isnot(None),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("no_registered"),
+        )
+        .group_by(VoterDistrictAssignment.district_type)
+        .all()
+    )
+    assignment_map = {
+        row[0]: {
+            "voters_compared": row[1],
+            "matched": row[2] or 0,
+            "mismatched": row[3] or 0,
+            "no_district": row[4] or 0,
+            "no_registered": row[5] or 0,
+        }
+        for row in assignment_stats
+    }
+
+    # Merge
+    all_types = sorted(set(boundary_map.keys()) | set(assignment_map.keys()))
+    result = {}
+    for dtype in all_types:
+        result[dtype] = {
+            "boundaries": boundary_map.get(dtype, 0),
+            **assignment_map.get(
+                dtype,
+                {
+                    "voters_compared": 0,
+                    "matched": 0,
+                    "mismatched": 0,
+                    "no_district": 0,
+                    "no_registered": 0,
+                },
+            ),
+        }
+
+    return result

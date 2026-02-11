@@ -14,11 +14,35 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+# Maps district type keys to the corresponding Voter model column names.
+# Used by import-geojson and compare-districts to look up a voter's
+# registered district value for any given district type.
+DISTRICT_TYPES: dict[str, str] = {
+    "county": "county",
+    "county_precinct": "county_precinct",
+    "congressional": "congressional_district",
+    "state_senate": "state_senate_district",
+    "state_house": "state_house_district",
+    "judicial": "judicial_district",
+    "county_commission": "county_commission_district",
+    "school_board": "school_board_district",
+    "city_council": "city_council_district",
+    "municipal_school_board": "municipal_school_board_district",
+    "water_board": "water_board_district",
+    "super_council": "super_council_district",
+    "super_commissioner": "super_commissioner_district",
+    "super_school_board": "super_school_board_district",
+    "fire": "fire_district",
+    "psc": "psc_district",
+    "municipality": "municipality",
+}
 
 
 class GeocodeResult(Base):
@@ -117,6 +141,7 @@ class Voter(Base):
     super_commissioner_district = Column(String, nullable=True)
     super_school_board_district = Column(String, nullable=True)
     fire_district = Column(String, nullable=True)
+    psc_district = Column(String, nullable=True)
 
     # Municipality and Land Information
     municipality = Column(String, nullable=True)
@@ -183,6 +208,11 @@ class Voter(Base):
         "GeocodeResult",
         back_populates="voter",
         order_by="GeocodeResult.geocoded_at.desc()",
+    )
+    district_assignments = relationship(
+        "VoterDistrictAssignment",
+        back_populates="voter",
+        cascade="all, delete-orphan",
     )
 
     # Additional indexes
@@ -338,3 +368,105 @@ class CountyCommissionDistrict(Base):
     def __repr__(self) -> str:
         """String representation of CountyCommissionDistrict model."""
         return f"<CountyCommissionDistrict(district_id='{self.district_id}', name='{self.name}')>"
+
+
+class DistrictBoundary(Base):
+    """Generic district boundary for any office type.
+
+    Stores boundary polygons for all district types found in voter roll data
+    (congressional, state senate, state house, county commission, school board,
+    etc.). The district_type column categorizes boundaries so multiple office
+    types can coexist in a single table.
+    """
+
+    __tablename__ = "district_boundaries"
+
+    id = Column(Integer, primary_key=True)
+
+    # District type must match a key in DISTRICT_TYPES
+    district_type = Column(String(50), nullable=False)
+
+    # District identifier (e.g., "1", "4A") - unique within a district_type
+    district_id = Column(String(50), nullable=False)
+
+    # Human-readable name (e.g., "Congressional District 14")
+    name = Column(String(200), nullable=False)
+
+    # Optional representative / officeholder metadata
+    rep_name = Column(String(200), nullable=True)
+    party = Column(String(50), nullable=True)
+    email = Column(String(200), nullable=True)
+    website_url = Column(String(500), nullable=True)
+    photo_url = Column(String(500), nullable=True)
+
+    # Arbitrary extra properties from the source GeoJSON
+    extra_properties = Column(JSON, nullable=True)
+
+    # County name(s) this district overlaps (for filtering in QGIS)
+    # Can be comma-separated for districts spanning multiple counties
+    county_name = Column(String(100), nullable=True)
+
+    # PostGIS geometry (GEOMETRY to accept both POLYGON and MULTIPOLYGON)
+    geom = Column(Geometry("GEOMETRY", srid=4326), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("district_type", "district_id", name="uq_district_type_id"),
+        Index("idx_district_boundary_type", "district_type"),
+        Index("idx_district_boundary_county", "county_name"),
+        Index("idx_district_boundary_geom", "geom", postgresql_using="gist"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DistrictBoundary(type='{self.district_type}', "
+            f"district_id='{self.district_id}', name='{self.name}')>"
+        )
+
+
+class VoterDistrictAssignment(Base):
+    """Tracks spatial district assignments for each voter across all district types.
+
+    For every combination of voter + district_type, this table stores what the
+    voter roll says (registered_value) and what PostGIS spatial analysis
+    determined (spatial_district_id / spatial_district_name), along with
+    whether there is a mismatch.
+    """
+
+    __tablename__ = "voter_district_assignments"
+
+    id = Column(Integer, primary_key=True)
+
+    voter_id = Column(
+        String,
+        ForeignKey("voters.voter_registration_number"),
+        nullable=False,
+    )
+
+    # Must match a key in DISTRICT_TYPES
+    district_type = Column(String(50), nullable=False)
+
+    # The value from the voter roll (e.g., "4" from county_commission_district)
+    registered_value = Column(String(100), nullable=True)
+
+    # The spatially determined district
+    spatial_district_id = Column(String(50), nullable=True)
+    spatial_district_name = Column(String(200), nullable=True)
+
+    # Mismatch flag: True when registered != spatial, NULL when comparison
+    # could not be performed (e.g., voter outside all boundaries)
+    is_mismatch = Column(Boolean, nullable=True)
+
+    compared_at = Column(DateTime, nullable=False, default=func.now())
+
+    # Relationships
+    voter = relationship("Voter", back_populates="district_assignments")
+
+    __table_args__ = (
+        UniqueConstraint("voter_id", "district_type", name="uq_voter_district_type"),
+        Index("idx_vda_voter", "voter_id"),
+        Index("idx_vda_type", "district_type"),
+        Index("idx_vda_mismatch", "is_mismatch"),
+        # Composite indexes for filtering performance
+        Index("idx_vda_voter_mismatch", "voter_id", "is_mismatch"),
+        Index("idx_vda_type_mismatch", "district_type", "is_mismatch"),
+    )

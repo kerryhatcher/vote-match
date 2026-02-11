@@ -16,7 +16,13 @@ from vote_match.config import Settings, get_settings
 from vote_match.database import init_database, get_engine, get_session
 from vote_match.logging import setup_logging
 from vote_match.csv_reader import read_voter_csv, dataframe_to_dicts
-from vote_match.models import CountyCommissionDistrict, GeocodeResult, Voter
+from vote_match.models import (
+    DISTRICT_TYPES,
+    CountyCommissionDistrict,
+    DistrictBoundary,
+    GeocodeResult,
+    Voter,
+)
 from vote_match.migrations import (
     create_migration,
     upgrade_database,
@@ -1216,6 +1222,38 @@ def status() -> None:
                 console.print(usps_table)
                 console.print()
 
+            # --- District Boundaries & Comparison Status ---
+            from vote_match.processing import get_district_status
+
+            district_info = get_district_status(session)
+            if district_info:
+                dist_table = Table(
+                    title="District Tracking Status",
+                    show_header=True,
+                    header_style="bold magenta",
+                )
+                dist_table.add_column("District Type", style="cyan")
+                dist_table.add_column("Boundaries", justify="right", style="green")
+                dist_table.add_column("Compared", justify="right", style="green")
+                dist_table.add_column("Matched", justify="right", style="green")
+                dist_table.add_column("Mismatched", justify="right", style="yellow")
+                dist_table.add_column("No Boundary", justify="right")
+                dist_table.add_column("No Reg Value", justify="right")
+
+                for dtype, info in district_info.items():
+                    dist_table.add_row(
+                        dtype,
+                        f"{info['boundaries']:,}",
+                        f"{info['voters_compared']:,}",
+                        f"{info['matched']:,}",
+                        f"{info['mismatched']:,}",
+                        f"{info['no_district']:,}",
+                        f"{info['no_registered']:,}",
+                    )
+
+                console.print(dist_table)
+                console.print()
+
         finally:
             session.close()
             engine.dispose()
@@ -1469,6 +1507,12 @@ def export(
         "--mismatch-only",
         help="Export only voters with district mismatches",
     ),
+    district_type: list[str] | None = typer.Option(
+        None,
+        "--district-type",
+        "-dt",
+        help="Filter by specific district type(s) when using --mismatch-only. Can be repeated. Examples: state_senate, congressional, county_commission",
+    ),
     exact_match_only: bool = typer.Option(
         False,
         "--exact-match-only",
@@ -1488,6 +1532,11 @@ def export(
         None,
         "--limit",
         help="Limit number of records to export",
+    ),
+    county: str | None = typer.Option(
+        None,
+        "--county",
+        help="Filter by county name (e.g., 'BIBB', 'FULTON')",
     ),
     upload_to_r2: bool = typer.Option(
         False,
@@ -1509,15 +1558,17 @@ def export(
     """Export voter records to CSV, GeoJSON, or interactive Leaflet map."""
     logger.info(
         "export command called with output: {}, format: {}, matched_only: {}, "
-        "mismatch_only: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, upload_to_r2: {}, redact_pii: {}, print_embed_code: {}",
+        "mismatch_only: {}, district_type: {}, exact_match_only: {}, include_districts: {}, title: {}, limit: {}, county: {}, upload_to_r2: {}, redact_pii: {}, print_embed_code: {}",
         output,
         format,
         matched_only,
         mismatch_only,
+        district_type,
         exact_match_only,
         include_districts,
         title,
         limit,
+        county,
         upload_to_r2,
         redact_pii,
         print_embed_code,
@@ -1568,6 +1619,8 @@ def export(
                     upload_to_r2=upload_to_r2,
                     redact_pii=redact_pii,
                     print_embed_code=print_embed_code,
+                    district_type=district_type,
+                    county=county,
                 )
                 return
 
@@ -1584,10 +1637,32 @@ def export(
                 )
 
             if mismatch_only:
-                query = query.filter(Voter.district_mismatch)
+                if district_type:
+                    # Filter by specific district type(s) using JOIN
+                    from vote_match.models import VoterDistrictAssignment
+
+                    query = (
+                        query.join(
+                            VoterDistrictAssignment,
+                            Voter.voter_registration_number == VoterDistrictAssignment.voter_id,
+                        )
+                        .filter(
+                            VoterDistrictAssignment.district_type.in_(district_type),
+                            VoterDistrictAssignment.is_mismatch,
+                        )
+                        .distinct()
+                    )  # Avoid duplicates if multiple district types
+                else:
+                    # No specific type: use legacy field (any mismatch)
+                    query = query.filter(Voter.district_mismatch)
 
             if exact_match_only:
                 query = query.filter(Voter.geocode_match_type == "exact")
+
+            if county:
+                # Normalize county name to uppercase for consistent matching
+                normalized_county = county.strip().upper()
+                query = query.filter(Voter.county == normalized_county)
 
             if limit:
                 query = query.limit(limit)
@@ -1781,6 +1856,8 @@ def _export_leaflet(
     upload_to_r2: bool = False,
     redact_pii: bool = False,
     print_embed_code: bool = False,
+    district_type: list[str] | None = None,
+    county: str | None = None,
 ) -> None:
     """
     Export voters to interactive Leaflet map HTML.
@@ -1798,6 +1875,8 @@ def _export_leaflet(
         upload_to_r2: If True, upload the generated map to Cloudflare R2
         redact_pii: If True, exclude PII fields from voter data
         print_embed_code: If True, print HTML iframe embed code after generation
+        district_type: List of district types to filter by (when mismatch_only is True)
+        county: Filter by county name (normalized to uppercase)
     """
     from vote_match.processing import generate_leaflet_map
 
@@ -1833,6 +1912,8 @@ def _export_leaflet(
             html_filename=html_filename,
             settings=settings,
             redact_pii=redact_pii,
+            district_type=district_type[0] if district_type else None,
+            county=county,
         )
 
         progress.update(task, completed=True)
@@ -1964,23 +2045,159 @@ def import_geojson(
         ...,
         help="Path to GeoJSON file containing district boundaries",
     ),
+    district_type: str | None = typer.Option(
+        None,
+        "--district-type",
+        "-t",
+        help=(
+            "Type of district boundaries being imported. "
+            "Use 'list' to show all valid types. "
+            "Required unless --legacy is used. "
+            "Examples: congressional, state_senate, county_commission, school_board"
+        ),
+    ),
     clear: bool = typer.Option(
         False,
         "--clear",
-        help="Clear all existing districts before importing",
+        help="Clear existing boundaries for this district type before importing",
+    ),
+    id_property: str | None = typer.Option(
+        None,
+        "--id-property",
+        help="GeoJSON property key containing district ID (auto-detected if omitted)",
+    ),
+    name_property: str | None = typer.Option(
+        None,
+        "--name-property",
+        help="GeoJSON property key containing district name (auto-detected if omitted)",
+    ),
+    legacy: bool = typer.Option(
+        False,
+        "--legacy",
+        help="Import into legacy county_commission_districts table (backward compat)",
     ),
 ) -> None:
-    """Import county commission district boundaries from GeoJSON file.
+    """Import district boundaries from a GeoJSON file.
 
-    The GeoJSON file should contain a FeatureCollection with district polygons
-    and their associated metadata (district ID, name, representative info, etc.).
+    Supports all district types found in state voter roll data:
+    congressional, state_senate, state_house, county_commission,
+    school_board, city_council, judicial, fire, municipality, and more.
+
+    Use --district-type list to see all valid types.
+
+    The GeoJSON file should contain a FeatureCollection with district polygons.
     """
-    logger.info("import-geojson command called with file: {}", geojson_file)
+    # Validate: either legacy OR district_type must be provided
+    if not legacy and district_type is None:
+        typer.secho(
+            "✗ Error: --district-type is required unless using --legacy",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        typer.echo("\nUse 'vote-match list-district-types' to see available types")
+        raise typer.Exit(code=1)
+
+    # Handle 'list' subcommand
+    if district_type == "list":
+        table = Table(title="Available District Types", header_style="bold magenta")
+        table.add_column("Type Key", style="cyan")
+        table.add_column("Voter Column", style="green")
+        for key, col in sorted(DISTRICT_TYPES.items()):
+            table.add_row(key, col)
+        console.print()
+        console.print(table)
+        console.print()
+        return
+
+    logger.info(
+        "import-geojson command called: file={}, type={}, legacy={}",
+        geojson_file,
+        district_type,
+        legacy,
+    )
+
+    # --- Legacy path (unchanged behavior for county_commission_districts) ---
+    if legacy:
+        settings = get_settings()
+        try:
+            if not geojson_file.exists():
+                typer.secho(
+                    f"✗ GeoJSON file not found: {geojson_file}",
+                    fg=typer.colors.RED,
+                    bold=True,
+                )
+                raise typer.Exit(code=1)
+
+            engine = get_engine(settings)
+            session = get_session(engine)
+            try:
+                if clear:
+                    count = session.query(CountyCommissionDistrict).count()
+                    typer.secho(
+                        f"WARNING: About to delete {count} existing legacy district records!",
+                        fg=typer.colors.RED,
+                        bold=True,
+                    )
+                    confirm = typer.confirm("Are you sure you want to continue?")
+                    if not confirm:
+                        typer.secho("Operation cancelled", fg=typer.colors.YELLOW)
+                        raise typer.Abort()
+
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    transient=False,
+                ) as progress:
+                    task = progress.add_task("Importing districts (legacy)...", total=None)
+                    from vote_match.processing import import_geojson_districts
+
+                    result = import_geojson_districts(
+                        session=session,
+                        file_path=geojson_file,
+                        clear_existing=clear,
+                    )
+                    progress.update(task, completed=True)
+
+                table = Table(title="Legacy Import Results", header_style="bold magenta")
+                table.add_column("Metric", style="cyan")
+                table.add_column("Count", style="green", justify="right")
+                table.add_row("Total Features", str(result["total"]))
+                table.add_row("Successfully Imported", str(result["success"]))
+                table.add_row("Skipped", str(result["skipped"]))
+                table.add_row("Failed", str(result["failed"]))
+                console.print()
+                console.print(table)
+                console.print()
+                typer.secho(
+                    f"✓ Legacy import complete: {result['success']} districts imported",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+            finally:
+                session.close()
+                engine.dispose()
+        except Exception as e:
+            typer.secho(f"✗ Import failed: {e}", fg=typer.colors.RED, bold=True)
+            logger.exception("import-geojson (legacy) failed: {}", e)
+            raise typer.Exit(code=1)
+        return
+
+    # --- New generic path ---
+    # After legacy path returns, district_type is guaranteed to be set
+    assert district_type is not None  # Type narrowing for mypy
+
+    if district_type not in DISTRICT_TYPES:
+        typer.secho(
+            f"✗ Unknown district type '{district_type}'. "
+            f"Valid types: {', '.join(sorted(DISTRICT_TYPES))}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
 
     settings = get_settings()
 
     try:
-        # Check file exists
         if not geojson_file.exists():
             typer.secho(
                 f"✗ GeoJSON file not found: {geojson_file}",
@@ -1989,16 +2206,18 @@ def import_geojson(
             )
             raise typer.Exit(code=1)
 
-        # Get database connection
         engine = get_engine(settings)
         session = get_session(engine)
 
         try:
-            # Confirm clear operation if requested
             if clear:
-                count = session.query(CountyCommissionDistrict).count()
+                count = (
+                    session.query(DistrictBoundary)
+                    .filter(DistrictBoundary.district_type == district_type)
+                    .count()
+                )
                 typer.secho(
-                    f"WARNING: About to delete {count} existing district records!",
+                    f"WARNING: About to delete {count} existing '{district_type}' boundaries!",
                     fg=typer.colors.RED,
                     bold=True,
                 )
@@ -2007,29 +2226,29 @@ def import_geojson(
                     typer.secho("Operation cancelled", fg=typer.colors.YELLOW)
                     raise typer.Abort()
 
-            # Import districts with progress indicator
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 transient=False,
             ) as progress:
-                task = progress.add_task("Importing districts...", total=None)
+                task = progress.add_task(f"Importing {district_type} boundaries...", total=None)
 
-                from vote_match.processing import import_geojson_districts
+                from vote_match.processing import import_district_boundaries
 
-                result = import_geojson_districts(
+                result = import_district_boundaries(
                     session=session,
                     file_path=geojson_file,
+                    district_type=district_type,
                     clear_existing=clear,
+                    id_property=id_property,
+                    name_property=name_property,
                 )
 
                 progress.update(task, completed=True)
 
-            # Display results
-            table = Table(title="Import Results", header_style="bold magenta")
+            table = Table(title=f"Import Results ({district_type})", header_style="bold magenta")
             table.add_column("Metric", style="cyan")
             table.add_column("Count", style="green", justify="right")
-
             table.add_row("Total Features", str(result["total"]))
             table.add_row("Successfully Imported", str(result["success"]))
             table.add_row("Skipped", str(result["skipped"]))
@@ -2039,9 +2258,8 @@ def import_geojson(
             console.print(table)
             console.print()
 
-            # Success message
             typer.secho(
-                f"✓ Import complete: {result['success']} districts imported",
+                f"✓ Import complete: {result['success']} {district_type} boundaries imported",
                 fg=typer.colors.GREEN,
                 bold=True,
             )
@@ -2067,59 +2285,713 @@ def import_geojson(
 
 
 @app.command()
-def compare_districts(
-    export: Path | None = typer.Option(
+def list_district_types() -> None:
+    """List all valid district types that can be imported and compared.
+
+    Shows the mapping between district type keys (used in commands) and
+    the corresponding voter registration columns.
+    """
+    table = Table(title="Available District Types", header_style="bold magenta")
+    table.add_column("Type Key", style="cyan", no_wrap=True)
+    table.add_column("Voter Column", style="green")
+    table.add_column("Description", style="white", max_width=50)
+
+    # Add descriptions for common types
+    descriptions = {
+        "congressional": "US Congressional Districts",
+        "state_senate": "State Senate Districts",
+        "state_house": "State House/Assembly Districts",
+        "county_commission": "County Commission Districts",
+        "school_board": "School Board Districts",
+        "city_council": "City Council Districts",
+        "judicial": "Judicial Districts",
+        "county_precinct": "County Voting Precincts",
+        "municipality": "City/Town Boundaries",
+        "fire": "Fire Districts",
+    }
+
+    for key, col in sorted(DISTRICT_TYPES.items()):
+        desc = descriptions.get(key, "")
+        table.add_row(key, col, desc)
+
+    console.print()
+    console.print(table)
+    console.print()
+    console.print(
+        "[dim]Use these type keys with:[/dim]\n"
+        "  [cyan]vote-match import-geojson file.json --district-type <type>[/cyan]\n"
+        "  [cyan]vote-match compare-districts --district-type <type>[/cyan]"
+    )
+    console.print()
+
+
+@app.command()
+def import_shapefiles(
+    data_dir: Path = typer.Option(
+        Path("data"),
+        "--data-dir",
+        "-d",
+        help="Directory containing district ZIP files (default: ./data)",
+    ),
+    clear: bool = typer.Option(
+        False,
+        "--clear",
+        help="Clear existing boundaries before importing (requires confirmation)",
+    ),
+    skip_existing: bool = typer.Option(
+        True,
+        "--skip-existing/--no-skip-existing",
+        help="Skip files for district types that already have boundaries (default: True)",
+    ),
+) -> None:
+    """Batch import all district shapefiles from the data directory.
+
+    Automatically maps district ZIP files to their types based on filename:
+    - congress-*.zip → congressional
+    - senate-*.zip → state_senate
+    - house-*.zip → state_house
+    - bibbcc-*.zip → county_commission (Bibb County Commission)
+    - bibbsb-*.zip → school_board (Bibb School Board)
+    - gaprec-*.zip → county_precinct (GA Precincts)
+    - psc-*.zip → psc (Public Service Commission)
+
+    Example:
+        vote-match import-shapefiles --data-dir data
+        vote-match import-shapefiles --clear --no-skip-existing
+    """
+    logger.info(f"import-shapefiles command called with data_dir: {data_dir}")
+
+    # Import processing function
+    from vote_match.processing import import_district_boundaries
+
+    # Filename prefix to district type mapping
+    FILENAME_TO_DISTRICT_TYPE = {
+        "congress": "congressional",
+        "senate": "state_senate",
+        "house": "state_house",
+        "bibbcc": "county_commission",
+        "bibbsb": "school_board",
+        "gaprec": "county_precinct",
+        "psc": "psc",
+    }
+
+    # Validate data directory
+    if not data_dir.exists():
+        typer.secho(
+            f"✗ Error: Data directory not found: {data_dir}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    if not data_dir.is_dir():
+        typer.secho(
+            f"✗ Error: Not a directory: {data_dir}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Find all ZIP files and map to district types
+    zip_files = list(data_dir.glob("*.zip"))
+    if not zip_files:
+        typer.secho(
+            f"✗ No ZIP files found in {data_dir}",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Build import plan
+    import_plan: list[tuple[Path, str]] = []
+    unmatched_files: list[Path] = []
+
+    for zip_file in sorted(zip_files):
+        # Skip checksum files
+        if zip_file.suffix == ".txt" or ".sha512" in zip_file.name:
+            continue
+
+        matched = False
+        filename_lower = zip_file.name.lower()
+
+        for prefix, district_type in FILENAME_TO_DISTRICT_TYPE.items():
+            if filename_lower.startswith(prefix):
+                import_plan.append((zip_file, district_type))
+                matched = True
+                break
+
+        if not matched:
+            unmatched_files.append(zip_file)
+
+    # Display import plan
+    console.print("\n[bold cyan]Import Plan[/bold cyan]\n")
+
+    if import_plan:
+        plan_table = Table(show_header=True, header_style="bold magenta")
+        plan_table.add_column("File", style="cyan")
+        plan_table.add_column("District Type", style="green")
+
+        for file_path, district_type in import_plan:
+            plan_table.add_row(file_path.name, district_type)
+
+        console.print(plan_table)
+    else:
+        typer.secho("✗ No matching files found to import", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+    if unmatched_files:
+        console.print("\n[yellow]Unmatched files (will be skipped):[/yellow]")
+        for file_path in unmatched_files:
+            console.print(f"  - {file_path.name}")
+
+    console.print()
+
+    # Get database connection
+    settings = get_settings()
+    engine = get_engine(settings)
+    session = get_session(engine)
+
+    try:
+        # Check which district types already have boundaries
+        existing_districts: set[str] = set()
+        for _, district_type in import_plan:
+            count = (
+                session.query(DistrictBoundary)
+                .filter(DistrictBoundary.district_type == district_type)
+                .count()
+            )
+            if count > 0:
+                existing_districts.add(district_type)
+
+        # Handle clear option
+        if clear:
+            if existing_districts:
+                typer.secho(
+                    f"\n⚠ Warning: This will delete ALL existing boundaries for {len(existing_districts)} district types:\n",
+                    fg=typer.colors.YELLOW,
+                    bold=True,
+                )
+                for district_type in sorted(existing_districts):
+                    count = (
+                        session.query(DistrictBoundary)
+                        .filter(DistrictBoundary.district_type == district_type)
+                        .count()
+                    )
+                    typer.secho(f"  - {district_type}: {count} boundaries", fg=typer.colors.YELLOW)
+
+                confirmed = typer.confirm("\nAre you sure you want to continue?", default=False)
+                if not confirmed:
+                    typer.secho("✗ Import cancelled", fg=typer.colors.YELLOW)
+                    raise typer.Exit(code=0)
+
+                # Clear all existing boundaries for types in import plan
+                for _, district_type in import_plan:
+                    session.query(DistrictBoundary).filter(
+                        DistrictBoundary.district_type == district_type
+                    ).delete()
+                session.commit()
+                typer.secho("✓ Cleared existing boundaries\n", fg=typer.colors.GREEN)
+                existing_districts.clear()
+
+        # Import each file
+        results: list[tuple[str, str, dict[str, int]]] = []
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            for file_path, district_type in import_plan:
+                # Skip if already exists and skip_existing is True
+                if skip_existing and district_type in existing_districts:
+                    task = progress.add_task(f"Skipping {district_type} (already exists)", total=1)
+                    progress.update(task, advance=1)
+                    results.append(
+                        (
+                            file_path.name,
+                            district_type,
+                            {"total": 0, "success": 0, "failed": 0, "skipped": 0},
+                        )
+                    )
+                    logger.info(f"Skipped {district_type} - already exists")
+                    continue
+
+                # Import boundaries
+                task = progress.add_task(f"Importing {district_type}...", total=None)
+
+                try:
+                    stats = import_district_boundaries(
+                        session=session,
+                        file_path=file_path,
+                        district_type=district_type,
+                        clear_existing=False,  # Already handled above if needed
+                    )
+                    results.append((file_path.name, district_type, stats))
+                    progress.update(task, completed=1, total=1)
+                    logger.info(
+                        f"Imported {district_type}: {stats['success']} success, "
+                        f"{stats['failed']} failed, {stats['skipped']} skipped"
+                    )
+                except Exception as e:
+                    progress.update(task, completed=1, total=1)
+                    logger.error(f"Failed to import {district_type}: {e}")
+                    results.append(
+                        (
+                            file_path.name,
+                            district_type,
+                            {"total": 0, "success": 0, "failed": 1, "skipped": 0},
+                        )
+                    )
+
+        # Display results summary
+        console.print("\n[bold cyan]Import Summary[/bold cyan]\n")
+
+        summary_table = Table(show_header=True, header_style="bold magenta")
+        summary_table.add_column("File", style="cyan")
+        summary_table.add_column("District Type", style="white")
+        summary_table.add_column("Total", justify="right", style="blue")
+        summary_table.add_column("Success", justify="right", style="green")
+        summary_table.add_column("Failed", justify="right", style="red")
+        summary_table.add_column("Skipped", justify="right", style="yellow")
+
+        total_all = 0
+        success_all = 0
+        failed_all = 0
+        skipped_all = 0
+
+        for filename, district_type, stats in results:
+            total_all += stats["total"]
+            success_all += stats["success"]
+            failed_all += stats["failed"]
+            skipped_all += stats["skipped"]
+
+            # Show status indicator
+            if stats["total"] == 0 and stats["failed"] == 0:
+                # Skipped because already exists
+                status = "⊘"
+            elif stats["failed"] > 0:
+                status = "✗"
+            elif stats["success"] > 0:
+                status = "✓"
+            else:
+                status = "-"
+
+            summary_table.add_row(
+                f"{status} {filename}",
+                district_type,
+                str(stats["total"]),
+                str(stats["success"]),
+                str(stats["failed"]),
+                str(stats["skipped"]),
+            )
+
+        # Add totals row
+        summary_table.add_row(
+            "[bold]TOTAL[/bold]",
+            "",
+            f"[bold]{total_all}[/bold]",
+            f"[bold]{success_all}[/bold]",
+            f"[bold]{failed_all}[/bold]",
+            f"[bold]{skipped_all}[/bold]",
+        )
+
+        console.print(summary_table)
+        console.print()
+
+        # Final status message
+        if failed_all > 0:
+            typer.secho(
+                f"⚠ Import completed with {failed_all} failures",
+                fg=typer.colors.YELLOW,
+                bold=True,
+            )
+        elif success_all > 0:
+            typer.secho(
+                f"✓ Successfully imported {success_all} district boundaries",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+        else:
+            typer.secho(
+                "✓ All districts already imported (use --no-skip-existing to re-import)",
+                fg=typer.colors.GREEN,
+            )
+
+        session.close()
+        engine.dispose()
+
+    except Exception as e:
+        session.close()
+        engine.dispose()
+        logger.exception("import-shapefiles failed with error: {}", e)
+        typer.secho(f"✗ Error: {e}", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(code=1)
+
+
+@app.command(name="link-districts-to-counties")
+def link_districts_to_counties(
+    csv_file: Path | None = typer.Argument(
         None,
-        "--export",
-        help="Export mismatches to CSV file",
+        help="Path to CSV file mapping counties to districts (e.g., counties-by-districts-2023.csv)",
+        exists=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    spatial: bool = typer.Option(
+        False,
+        "--spatial",
+        help="Use PostGIS spatial joins instead of CSV mapping",
+    ),
+    district_type: str | None = typer.Option(
+        None,
+        "--district-type",
+        "-t",
+        help="Specific district type to process (default: all)",
+    ),
+    state_fips: str | None = typer.Option(
+        None,
+        "--state-fips",
+        help="State FIPS code for spatial filtering (e.g., '13' for Georgia)",
+    ),
+    validate: bool = typer.Option(
+        False,
+        "--validate",
+        help="Compare CSV vs spatial results and report mismatches",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Overwrite existing county associations",
+    ),
+) -> None:
+    """Link districts to counties for QGIS filtering.
+
+    This command associates district boundaries with county names to enable
+    filtering in QGIS. It supports two modes:
+
+    1. CSV mode: Use authoritative county-to-district mappings from CSV
+       (Georgia only: congressional, state_senate, state_house)
+
+    2. Spatial mode: Use PostGIS spatial joins to automatically determine
+       which counties intersect which districts (works for any state/district type)
+
+    3. Validate mode: Compare CSV vs spatial results to identify mismatches
+
+    Examples:
+
+        # Link Georgia districts using CSV (authoritative)
+        vote-match link-districts-to-counties data/counties-by-districts-2023.csv
+
+        # Use spatial joins for all districts
+        vote-match link-districts-to-counties --spatial
+
+        # Use spatial joins for specific district type
+        vote-match link-districts-to-counties --spatial --district-type congressional
+
+        # Validate CSV vs spatial results
+        vote-match link-districts-to-counties --validate data/counties-by-districts-2023.csv
+
+        # Filter spatial joins to Georgia counties only
+        vote-match link-districts-to-counties --spatial --state-fips 13
+    """
+    from .county_linking import (
+        link_districts_from_csv,
+        link_districts_spatial,
+        validate_county_links,
+    )
+
+    logger.info(
+        f"link-districts-to-counties called with csv_file={csv_file}, "
+        f"spatial={spatial}, validate={validate}, district_type={district_type}"
+    )
+
+    # Validate arguments
+    if validate and not csv_file:
+        typer.secho(
+            "✗ Error: --validate requires a CSV file argument",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    if not csv_file and not spatial:
+        typer.secho(
+            "✗ Error: Must provide either a CSV file or use --spatial flag",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Setup database
+    settings = get_settings()
+    engine = get_engine(settings)
+    session = get_session(engine)
+
+    try:
+        # Validation mode
+        if validate:
+            typer.secho(
+                "⚙ Validating county links (CSV vs spatial)...",
+                fg=typer.colors.CYAN,
+            )
+            results = validate_county_links(session, csv_file, district_type)
+
+            typer.secho("\n📊 Validation Results:", fg=typer.colors.YELLOW, bold=True)
+            typer.secho(f"  ✓ Matches: {results['matches']}", fg=typer.colors.GREEN)
+            typer.secho(f"  ✗ Mismatches: {results['mismatches']}", fg=typer.colors.RED)
+            typer.secho(f"  📄 CSV only: {results['csv_only']}", fg=typer.colors.BLUE)
+            typer.secho(
+                f"  🗺  Spatial only: {results['spatial_only']}",
+                fg=typer.colors.MAGENTA,
+            )
+
+            # Show mismatch details
+            if results["details"]:
+                typer.secho("\n⚠ Mismatch Details:", fg=typer.colors.YELLOW, bold=True)
+                for detail in results["details"][:10]:  # Limit to 10
+                    typer.secho(
+                        f"  {detail['district_type']} {detail['district_id']}:",
+                        fg=typer.colors.WHITE,
+                    )
+                    typer.secho(
+                        f"    CSV: {', '.join(detail['csv_counties'])}",
+                        fg=typer.colors.BLUE,
+                    )
+                    typer.secho(
+                        f"    Spatial: {', '.join(detail['spatial_counties'])}",
+                        fg=typer.colors.MAGENTA,
+                    )
+                if len(results["details"]) > 10:
+                    typer.secho(
+                        f"  ... and {len(results['details']) - 10} more mismatches",
+                        fg=typer.colors.YELLOW,
+                    )
+
+        # CSV mode
+        elif csv_file:
+            typer.secho(
+                f"⚙ Linking districts to counties from CSV: {csv_file}",
+                fg=typer.colors.CYAN,
+            )
+            stats = link_districts_from_csv(session, csv_file, overwrite=overwrite)
+
+            typer.secho("\n✓ CSV linking completed!", fg=typer.colors.GREEN, bold=True)
+            typer.secho(f"  Updated: {stats['updated']}", fg=typer.colors.GREEN)
+            typer.secho(f"  Skipped: {stats['skipped']}", fg=typer.colors.YELLOW)
+            typer.secho(f"  Not found: {stats['not_found']}", fg=typer.colors.RED)
+            typer.secho(f"  Errors: {stats['errors']}", fg=typer.colors.RED)
+
+        # Spatial mode
+        elif spatial:
+            typer.secho(
+                "⚙ Linking districts to counties using spatial joins...",
+                fg=typer.colors.CYAN,
+            )
+            stats = link_districts_spatial(
+                session,
+                district_type=district_type,
+                state_fips=state_fips,
+                overwrite=overwrite,
+            )
+
+            typer.secho("\n✓ Spatial linking completed!", fg=typer.colors.GREEN, bold=True)
+            typer.secho(f"  Updated: {stats['updated']}", fg=typer.colors.GREEN)
+            typer.secho(f"  Skipped: {stats['skipped']}", fg=typer.colors.YELLOW)
+            typer.secho(f"  No overlap: {stats['no_overlap']}", fg=typer.colors.BLUE)
+            typer.secho(f"  Errors: {stats['errors']}", fg=typer.colors.RED)
+
+        # Next steps
+        typer.secho(
+            "\n💡 Next steps:",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+        typer.secho(
+            "  1. Open QGIS and connect to your PostGIS database",
+            fg=typer.colors.WHITE,
+        )
+        typer.secho("  2. Load the district_boundaries layer", fg=typer.colors.WHITE)
+        typer.secho(
+            "  3. Filter by: district_type = 'congressional' AND county_name LIKE '%BIBB%'",
+            fg=typer.colors.WHITE,
+        )
+
+    except Exception as e:
+        session.close()
+        engine.dispose()
+        logger.exception("link-districts-to-counties failed with error: {}", e)
+        typer.secho(f"✗ Error: {e}", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(code=1)
+
+    finally:
+        session.close()
+        engine.dispose()
+
+
+@app.command()
+def compare_districts(
+    district_type: list[str] | None = typer.Option(
+        None,
+        "--district-type",
+        "-t",
+        help=(
+            "District type(s) to compare (can be repeated). "
+            "Omit to compare ALL types that have imported boundaries."
+        ),
     ),
     save_to_db: bool = typer.Option(
         False,
         "--save-to-db",
-        help="Save comparison results to voters table for QGIS filtering",
+        help="Persist comparison results to voter_district_assignments table",
     ),
     limit: int | None = typer.Option(
         None,
         "--limit",
         help="Limit number of voters to process (for testing)",
     ),
+    legacy: bool = typer.Option(
+        False,
+        "--legacy",
+        help="Run legacy county-commission comparison (backward compat)",
+    ),
+    export: Path | None = typer.Option(
+        None,
+        "--export",
+        help="(Legacy only) Export mismatches to CSV file",
+    ),
 ) -> None:
     """Compare voter registration districts with spatial district boundaries.
 
-    Uses PostGIS spatial joins to determine which district polygon contains
-    each voter's geocoded point location, then compares with their registered
-    county precinct district.
+    By default, compares all district types that have boundaries in the
+    database. Use --district-type to compare specific types only.
+
+    Uses PostGIS spatial joins to determine which district boundary contains
+    each voter's geocoded point, then compares with their voter-roll value.
 
     Note: Voters must have geocoded locations (run 'geocode' and 'sync-geocode'
-    first) and districts must be imported (run 'import-geojson' first).
+    first) and boundaries must be imported (run 'import-geojson' first).
     """
     logger.info("compare-districts command called")
 
     settings = get_settings()
 
     try:
-        # Get database connection
         engine = get_engine(settings)
         session = get_session(engine)
 
         try:
-            # Check if districts have been imported
-            district_count = session.query(CountyCommissionDistrict).count()
-            if district_count == 0:
-                typer.secho(
-                    "✗ No districts found. Please run 'import-geojson' first.",
-                    fg=typer.colors.RED,
-                    bold=True,
+            # --- Legacy path (unchanged behavior) ---
+            if legacy:
+                district_count = session.query(CountyCommissionDistrict).count()
+                if district_count == 0:
+                    typer.secho(
+                        "✗ No legacy districts found. Run 'import-geojson --legacy' first.",
+                        fg=typer.colors.RED,
+                        bold=True,
+                    )
+                    raise typer.Exit(code=1)
+
+                typer.echo(f"Found {district_count} legacy districts in database")
+
+                voters_with_geom = session.query(Voter).filter(Voter.geom.isnot(None)).count()
+                if voters_with_geom == 0:
+                    typer.secho(
+                        "✗ No voters with geocoded locations.",
+                        fg=typer.colors.RED,
+                        bold=True,
+                    )
+                    raise typer.Exit(code=1)
+
+                typer.echo(f"Found {voters_with_geom} voters with geocoded locations")
+
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    transient=False,
+                ) as progress:
+                    task = progress.add_task("Comparing districts (legacy)...", total=None)
+                    from vote_match.processing import (
+                        compare_voter_districts,
+                        export_district_comparison,
+                        update_voter_district_comparison,
+                    )
+
+                    result = compare_voter_districts(session=session, limit=limit)
+                    progress.update(task, completed=True)
+
+                stats = result["stats"]
+                mismatches = result["mismatches"]
+
+                table = Table(
+                    title="Legacy District Comparison Results",
+                    header_style="bold magenta",
                 )
-                raise typer.Exit(code=1)
+                table.add_column("Metric", style="cyan")
+                table.add_column("Count", style="green", justify="right")
+                table.add_column("Percentage", style="yellow", justify="right")
 
-            typer.echo(f"Found {district_count} districts in database")
+                total = stats["total"]
+                matched = stats["matched"]
+                mismatched = stats["mismatched"]
+                no_district = stats["no_district"]
 
-            # Check if voters have geocoded locations
+                matched_pct = (matched / total * 100) if total > 0 else 0
+                mismatched_pct = (mismatched / total * 100) if total > 0 else 0
+                no_district_pct = (no_district / total * 100) if total > 0 else 0
+
+                table.add_row("Total Voters Processed", str(total), "100.0%")
+                table.add_row("Matched Districts", str(matched), f"{matched_pct:.1f}%")
+                table.add_row("Mismatched Districts", str(mismatched), f"{mismatched_pct:.1f}%")
+                table.add_row("No District Found", str(no_district), f"{no_district_pct:.1f}%")
+
+                console.print()
+                console.print(table)
+                console.print()
+
+                if export:
+                    export_district_comparison(mismatches, export)
+                    typer.secho(
+                        f"✓ Exported {len(mismatches)} mismatches to {export}",
+                        fg=typer.colors.GREEN,
+                        bold=True,
+                    )
+
+                if save_to_db:
+                    typer.echo()
+                    typer.echo("Updating voters table (legacy columns)...")
+                    update_stats = update_voter_district_comparison(
+                        session=session,
+                        clear_existing=True,
+                        limit=limit,
+                    )
+                    typer.secho(
+                        f"✓ Updated {update_stats['records_updated']} voter records "
+                        f"({update_stats['mismatched']} mismatches found)",
+                        fg=typer.colors.GREEN,
+                        bold=True,
+                    )
+                    typer.echo("Filter in QGIS with: WHERE district_mismatch = true")
+
+                if mismatched > 0:
+                    typer.secho(
+                        f"Found {mismatched} voters in different districts than registered",
+                        fg=typer.colors.YELLOW,
+                        bold=True,
+                    )
+                else:
+                    typer.secho(
+                        "✓ All voters are in their registered districts",
+                        fg=typer.colors.GREEN,
+                        bold=True,
+                    )
+                logger.info("compare-districts (legacy) completed")
+                return
+
+            # --- New multi-district path ---
             voters_with_geom = session.query(Voter).filter(Voter.geom.isnot(None)).count()
             if voters_with_geom == 0:
                 typer.secho(
-                    "✗ No voters with geocoded locations. Please run 'geocode' and 'sync-geocode' first.",
+                    "✗ No voters with geocoded locations. Run 'geocode' and 'sync-geocode' first.",
                     fg=typer.colors.RED,
                     bold=True,
                 )
@@ -2127,7 +2999,19 @@ def compare_districts(
 
             typer.echo(f"Found {voters_with_geom} voters with geocoded locations")
 
-            # Run comparison with progress indicator
+            # Check for available boundaries
+            boundary_count = session.query(DistrictBoundary).count()
+            if boundary_count == 0:
+                typer.secho(
+                    "✗ No district boundaries found. "
+                    "Run 'import-geojson --district-type <type>' first.",
+                    fg=typer.colors.RED,
+                    bold=True,
+                )
+                raise typer.Exit(code=1)
+
+            typer.echo(f"Found {boundary_count} district boundaries in database")
+
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -2135,83 +3019,82 @@ def compare_districts(
             ) as progress:
                 task = progress.add_task("Comparing districts...", total=None)
 
-                from vote_match.processing import (
-                    compare_voter_districts,
-                    export_district_comparison,
-                    update_voter_district_comparison,
-                )
+                from vote_match.processing import compare_all_districts
 
-                result = compare_voter_districts(session=session, limit=limit)
+                results = compare_all_districts(
+                    session=session,
+                    district_types=district_type,
+                    limit=limit,
+                    save_to_db=save_to_db,
+                )
 
                 progress.update(task, completed=True)
 
-            stats = result["stats"]
-            mismatches = result["mismatches"]
+            if not results:
+                typer.secho(
+                    "No matching district types found for comparison.",
+                    fg=typer.colors.YELLOW,
+                )
+                return
 
-            # Display statistics
-            table = Table(title="District Comparison Results", header_style="bold magenta")
-            table.add_column("Metric", style="cyan")
-            table.add_column("Count", style="green", justify="right")
-            table.add_column("Percentage", style="yellow", justify="right")
+            # Display results per district type
+            for dtype, stats in results.items():
+                total = stats["total"]
+                matched = stats["matched"]
+                mismatched = stats["mismatched"]
+                no_dist = stats["no_district"]
+                no_reg = stats["no_registered"]
 
-            total = stats["total"]
-            matched = stats["matched"]
-            mismatched = stats["mismatched"]
-            no_district = stats["no_district"]
+                table = Table(
+                    title=f"Comparison: {dtype}",
+                    header_style="bold magenta",
+                )
+                table.add_column("Metric", style="cyan")
+                table.add_column("Count", style="green", justify="right")
+                table.add_column("Percentage", style="yellow", justify="right")
 
-            # Calculate percentages
-            matched_pct = (matched / total * 100) if total > 0 else 0
-            mismatched_pct = (mismatched / total * 100) if total > 0 else 0
-            no_district_pct = (no_district / total * 100) if total > 0 else 0
+                matched_pct = (matched / total * 100) if total > 0 else 0
+                mismatched_pct = (mismatched / total * 100) if total > 0 else 0
+                no_dist_pct = (no_dist / total * 100) if total > 0 else 0
+                no_reg_pct = (no_reg / total * 100) if total > 0 else 0
 
-            table.add_row("Total Voters Processed", str(total), "100.0%")
-            table.add_row("Matched Districts", str(matched), f"{matched_pct:.1f}%")
-            table.add_row("Mismatched Districts", str(mismatched), f"{mismatched_pct:.1f}%")
-            table.add_row("No District Found", str(no_district), f"{no_district_pct:.1f}%")
+                table.add_row("Total Voters", str(total), "100.0%")
+                table.add_row("Matched", str(matched), f"{matched_pct:.1f}%")
+                table.add_row("Mismatched", str(mismatched), f"{mismatched_pct:.1f}%")
+                table.add_row("No Boundary Found", str(no_dist), f"{no_dist_pct:.1f}%")
+                table.add_row("No Registration Value", str(no_reg), f"{no_reg_pct:.1f}%")
+
+                console.print()
+                console.print(table)
 
             console.print()
-            console.print(table)
-            console.print()
 
-            # Export mismatches if requested
-            if export:
-                export_district_comparison(mismatches, export)
+            # Summary across all types
+            total_mismatches = sum(s["mismatched"] for s in results.values())
+            if total_mismatches > 0:
                 typer.secho(
-                    f"✓ Exported {len(mismatches)} mismatches to {export}",
-                    fg=typer.colors.GREEN,
-                    bold=True,
-                )
-
-            # Save to database if requested
-            if save_to_db:
-                typer.echo()
-                typer.echo("Updating voters table with comparison results...")
-
-                update_stats = update_voter_district_comparison(
-                    session=session,
-                    clear_existing=True,
-                    limit=limit,
-                )
-
-                typer.secho(
-                    f"✓ Updated {update_stats['records_updated']} voter records "
-                    f"({update_stats['mismatched']} mismatches found)",
-                    fg=typer.colors.GREEN,
-                    bold=True,
-                )
-
-                typer.echo("Filter in QGIS with: WHERE district_mismatch = true")
-
-            # Summary message
-            if mismatched > 0:
-                typer.secho(
-                    f"⚠ Found {mismatched} voters in different districts than registered",
+                    f"Found {total_mismatches} total mismatches across "
+                    f"{len(results)} district type(s)",
                     fg=typer.colors.YELLOW,
                     bold=True,
                 )
             else:
                 typer.secho(
-                    "✓ All voters are in their registered districts",
+                    f"✓ All voters are in their registered districts across {len(results)} type(s)",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+
+            # Confirm legacy field sync if results were saved
+            if save_to_db:
+                typer.secho(
+                    "✓ Updated legacy district_mismatch field for backward compatibility",
+                    fg=typer.colors.GREEN,
+                )
+
+            if save_to_db:
+                typer.secho(
+                    "✓ Results saved to voter_district_assignments table",
                     fg=typer.colors.GREEN,
                     bold=True,
                 )

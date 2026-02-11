@@ -23,6 +23,36 @@ settings = get_settings()
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
 
+def include_object(_object, name, type_, _reflected, _compare_to):
+    """Filter out Django/Wagtail tables and other non-project tables.
+
+    Only include tables that are defined in our Vote Match models.
+    """
+    # List of table prefixes to ignore
+    ignore_prefixes = [
+        "auth_",
+        "django_",
+        "wagtail",
+        "taggit_",
+        "world_",
+        "checkin_",
+        "public",  # Ignore 'public' table if it exists
+    ]
+
+    # For tables, check if they should be included
+    if type_ == "table":
+        # Ignore tables with specific prefixes
+        for prefix in ignore_prefixes:
+            if name.startswith(prefix):
+                return False
+
+        # Ignore alembic_version table (managed by Alembic itself)
+        if name == "alembic_version":
+            return False
+
+    return True
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
     url = config.get_main_option("sqlalchemy.url")
@@ -32,6 +62,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_schemas=False,
+        include_object=include_object,
         compare_type=True,
         compare_server_default=True,
     )
@@ -53,6 +84,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             include_schemas=False,
+            include_object=include_object,
             compare_type=True,
             compare_server_default=True,
         )

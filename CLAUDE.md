@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+[Project Background](docs/PROJECT_SUMMARY.md)
+
 ## Project Overview
 
 Vote Match is a Python tool for processing voter registration records for GIS applications. The primary workflow involves:
@@ -19,6 +21,9 @@ Vote Match is a Python tool for processing voter registration records for GIS ap
 - `vote-match geocode --service <name>` - Geocode addresses using specified service (census, nominatim, etc.)
 - `vote-match sync-geocode` - **Required for QGIS**: Sync best geocoding results to Voter table
 - `vote-match delete-geocode-results --service <name> --status <status>` - Delete geocoding results for retry
+- `vote-match import-shapefiles` - Batch import all district shapefiles from data folder
+- `vote-match import-geojson <file> --district-type <type>` - Import individual district shapefile/GeoJSON
+- `vote-match compare-districts --district-type <type>` - Compare voter registered districts vs spatial districts
 - `vote-match status` - View geocoding statistics and progress
 - `vote-match export <file>` - Export voter data to CSV or GeoJSON
 
@@ -157,6 +162,239 @@ New services are registered in `src/vote_match/geocoding/registry.py`:
 2. Inherit from `GeocodeService` base class
 3. Implement `geocode_batch()` method
 4. Register with `@GeocodeServiceRegistry.register()` decorator
+
+## District Management
+
+Vote Match supports importing and comparing district boundaries for spatial analysis.
+
+### Supported District Types
+
+The following district types are supported (see `DISTRICT_TYPES` in `models.py`):
+
+- **county** - County Boundaries (for filtering districts by county)
+- **congressional** - US Congressional Districts
+- **state_senate** - State Senate Districts
+- **state_house** - State House/Assembly Districts
+- **county_commission** - County Commission Districts
+- **school_board** - School Board Districts
+- **county_precinct** - County Voting Precincts
+- **psc** - Public Service Commission Districts
+- **city_council** - City Council Districts
+- **judicial** - Judicial Districts
+- **municipality** - City/Town Boundaries
+- **fire** - Fire Districts
+- **water_board** - Water Board Districts
+- Other super-districts and municipal districts
+
+### Batch Import Workflow
+
+For importing multiple district shapefiles at once:
+
+1. **Place shapefiles in data directory**
+   - Files must be in ZIP format containing shapefiles
+   - Filename prefixes are auto-mapped to district types:
+     - `congress-*.zip` → congressional
+     - `senate-*.zip` → state_senate
+     - `house-*.zip` → state_house
+     - `bibbcc-*.zip` → county_commission
+     - `bibbsb-*.zip` → school_board
+     - `gaprec-*.zip` → county_precinct
+     - `psc-*.zip` → psc
+
+2. **Run batch import**
+
+   ```bash
+   vote-match import-shapefiles --data-dir data
+   ```
+
+3. **Verify import**
+
+   ```bash
+   # Check imported districts in database
+   psql -d vote_match -c "SELECT district_type, COUNT(*) FROM district_boundaries GROUP BY district_type;"
+   ```
+
+**Import options:**
+
+- `--skip-existing` (default: True) - Skip district types that already have boundaries
+- `--no-skip-existing` - Re-import even if boundaries exist
+- `--clear` - Delete all existing boundaries before importing (requires confirmation)
+
+### Individual Import
+
+For importing a single district file:
+
+```bash
+vote-match import-geojson data/congress-2023-shape.zip --district-type congressional
+```
+
+Supports: `.geojson`, `.json`, `.shp`, `.zip` (containing shapefiles)
+
+### District Comparison
+
+Compare voter registered districts vs spatial districts using PostGIS spatial joins:
+
+```bash
+# Compare single district type
+vote-match compare-districts --district-type congressional --save-to-db
+
+# Compare multiple district types
+vote-match compare-districts --district-type congressional --district-type state_senate --save-to-db
+```
+
+**Note:** When using `--save-to-db`, the legacy `district_mismatch` field is automatically updated for backward compatibility with existing QGIS projects.
+
+### Export with District Type Filtering
+
+Export voters with mismatches for specific district type(s):
+
+```bash
+# Export state senate mismatches to CSV
+vote-match export bibb-senate-mismatches.csv \
+  --county BIBB \
+  --mismatch-only \
+  --district-type state_senate
+
+# Export to interactive web map with correct district boundaries
+vote-match export bibb-senate-map.html \
+  --format leaflet \
+  --county BIBB \
+  --mismatch-only \
+  --district-type state_senate \
+  --include-districts \
+  --redact-pii
+
+# Multiple district types (voters mismatched in EITHER type)
+vote-match export mismatches.csv \
+  --mismatch-only \
+  --district-type state_senate \
+  --district-type congressional
+
+# Export all mismatches (any district type)
+vote-match export all-mismatches.csv \
+  --mismatch-only
+```
+
+**Key features:**
+
+- `--district-type` filters by specific district type(s) when using `--mismatch-only`
+- Without `--district-type`, uses legacy `district_mismatch` field (any mismatch)
+- Leaflet maps show correct district boundaries for the specified type
+- Can be combined with `--county` for geographic filtering
+
+### QGIS Filtering by District Type
+
+To filter voters by specific district type mismatches in QGIS:
+
+#### Option 1: Simple (any mismatch)
+
+```sql
+"district_mismatch" = true
+```
+
+#### Option 2: Specific district type (requires JOIN)
+
+Since `VoterDistrictAssignment` tracks per-district-type mismatches, you can create a QGIS relationship:
+
+1. Add both `voters` and `voter_district_assignments` layers to QGIS
+2. Create a relationship: `voters.voter_registration_number` → `voter_district_assignments.voter_id`
+3. Filter voters layer:
+
+   ```sql
+   "voter_registration_number" IN (
+     SELECT voter_id FROM voter_district_assignments
+     WHERE district_type = 'state_senate' AND is_mismatch = true
+   )
+   ```
+
+#### Option 3: Export filtered data
+
+For simpler QGIS workflows, export filtered data directly:
+
+```bash
+vote-match export qgis-senate-mismatches.geojson \
+  --format geojson \
+  --mismatch-only \
+  --district-type state_senate \
+  --county BIBB
+```
+
+### County-Based Filtering
+
+Vote Match supports filtering districts by county in QGIS. This enables spatial analysis and visualization of districts within specific counties.
+
+**Workflow:**
+
+1. **Import county boundaries** (one-time setup):
+
+   ```bash
+   vote-match import-geojson data/tl_2025_us_county.zip --district-type county
+   ```
+
+   This imports ~3,200 US county boundaries from Census TIGER/Line shapefiles.
+
+2. **Link districts to counties**:
+
+   **Option A: Use CSV mapping (Georgia only, authoritative)**
+
+   ```bash
+   vote-match link-districts-to-counties data/counties-by-districts-2023.csv
+   ```
+
+   Uses official Georgia state mappings for congressional, state senate, and state house districts.
+
+   **Option B: Use spatial joins (any state, automatic)**
+
+   ```bash
+   # Link all district types
+   vote-match link-districts-to-counties --spatial
+
+   # Link specific district type
+   vote-match link-districts-to-counties --spatial --district-type congressional
+
+   # Filter to Georgia counties only
+   vote-match link-districts-to-counties --spatial --state-fips 13
+   ```
+
+   Uses PostGIS `ST_Intersects` to automatically determine which counties overlap which districts.
+
+3. **Validate mappings** (optional):
+
+   ```bash
+   vote-match link-districts-to-counties --validate data/counties-by-districts-2023.csv
+   ```
+
+   Compares CSV mappings vs spatial joins to identify mismatches.
+
+**QGIS Filtering Examples:**
+
+Once districts are linked to counties, you can filter in QGIS using the `county_name` attribute:
+
+```sql
+-- Show congressional districts in Bibb County
+"district_type" = 'congressional' AND "county_name" LIKE '%BIBB%'
+
+-- Show all districts in multiple counties
+"county_name" LIKE '%BIBB%' OR "county_name" LIKE '%MONROE%'
+
+-- Show districts entirely within a single county (not spanning multiple)
+"county_name" = 'BIBB'
+```
+
+**Notes:**
+
+- Many Georgia districts span multiple counties - their `county_name` contains comma-separated values (e.g., "BIBB, MONROE, JONES")
+- County names are normalized to uppercase without "County" suffix
+- CSV provides authoritative mappings for Georgia; spatial joins work nationwide
+- Use `--overwrite` flag to update existing county associations
+
+### QGIS Visualization
+
+1. Connect to PostGIS database
+2. Load `district_boundaries` layer
+3. Filter by `district_type` to view specific districts
+4. Style polygons by district properties (name, party, etc.)
+5. Overlay with `voters` layer (requires `sync-geocode` first)
 
 ## Database Migrations
 

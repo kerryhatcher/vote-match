@@ -3,6 +3,7 @@ logs/
 *.csv
 *.pdf
 web/
+*.zip
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -227,3 +228,4 @@ mbc-page-error.png
 mbc-page-current-state.png
 mbc2-test.png
 mbc-test.html
+data/bibbcc-2022-shape-file.zip

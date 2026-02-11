@@ -8,9 +8,11 @@ This document provides the full background, motivation, methodology, and technic
 
 ## Purpose
 
-Vote Match is an open-source Python tool that compares voter registration records against official county commission district boundaries to identify mismatches -- voters whose registered district (per the Georgia Secretary of State) does not match the district they physically reside in (per the county's own GIS district map).
+Vote Match is an open-source Python tool that compares voter registration records against official district boundaries to identify mismatches -- voters whose registered district (per the Georgia Secretary of State) does not match the district they physically reside in (per GIS boundary maps).
 
-The project's primary output was a finding that **at least 540 voters in Macon-Bibb County, Georgia were registered in District 5 according to the Secretary of State, but do not reside in District 5 according to Macon-Bibb County's own GIS district boundaries.** The total number of mismatched voters across all districts grew to **1,035** as the analysis was refined.
+The tool supports **all 15 district types** found in Georgia voter roll data: congressional, state senate, state house, county commission, judicial, school board, city council, municipal school board, water board, super council, super commissioner, super school board, fire district, municipality, and county precinct.
+
+The project's initial focus was county commission districts in Macon-Bibb County. The primary finding was that **at least 540 voters in Macon-Bibb County, Georgia were registered in District 5 according to the Secretary of State, but do not reside in District 5 according to Macon-Bibb County's own GIS district boundaries.** The total number of mismatched voters across all county commission districts grew to **1,035** as the analysis was refined.
 
 The findings, along with interactive maps and CSV data, were shared directly with county officials (Mr. Gillon and Ms. Evans) and the underlying code was published publicly on GitHub.
 
@@ -104,32 +106,66 @@ Voter CSV (GA SOS) ──► load-csv ──► Voter Table (PostGIS)
                                     sync-geocode (best result → Voter.geom)
                                           │
                                           ▼
-District GeoJSON (MBC GIS) ──► import-geojson ──► CountyCommissionDistrict Table
-                                                        │
-                                                        ▼
-                                                  compare-districts
-                                                  (ST_Within spatial join)
-                                                        │
-                                                        ▼
-                                              Mismatch Results (CSV, Map)
-                                                        │
-                                                        ▼
-                                              export --format leaflet
-                                              --upload-to-r2
-                                                        │
-                                                        ▼
-                                              Interactive Web Map (Cloudflare R2)
+District GeoJSON/Shapefile ──► import-geojson ──► DistrictBoundary Table
+(Congressional, State Senate,       --district-type <type>    (all district types)
+County Commission, School Board,                                   │
+etc.)                                                              ▼
+                                                          compare-districts
+                                                    (ST_Within spatial join for
+                                                     all or specified district types)
+                                                                   │
+                                                                   ▼
+                                                     VoterDistrictAssignment Table
+                                                     (per-voter per-type results)
+                                                                   │
+                                                                   ▼
+                                                     Mismatch Results (CSV, Map)
+                                                                   │
+                                                                   ▼
+                                                         export --format leaflet
+                                                         --upload-to-r2
+                                                                   │
+                                                                   ▼
+                                                     Interactive Web Map (Cloudflare R2)
 ```
 
 ### Database Schema
 
-Three tables in PostGIS:
+Four main tables in PostGIS:
 
-1. **`voters`** -- One row per voter registration record. Contains name, address components, all district assignments from the SOS file, geocoding results, PostGIS POINT geometry (`geom`), and spatial comparison results (`spatial_district_id`, `district_mismatch`).
+1. **`voters`** -- One row per voter registration record. Contains name, address components, all 15 district assignments from the SOS file, geocoding results, PostGIS POINT geometry (`geom`), and legacy spatial comparison fields for backward compatibility.
 
 2. **`geocode_results`** -- One row per voter per geocoding service. Stores the result from each service independently so the system can select the best result. Indexed on `(voter_id, service_name)`.
 
-3. **`county_commission_districts`** -- One row per district. Stores the district boundary as a PostGIS POLYGON geometry with a GiST spatial index, plus metadata (representative names, party, contact info).
+3. **`district_boundaries`** -- Generic district boundary storage for all district types. Each row represents one district boundary with a `district_type` column (e.g., "congressional", "county_commission"), `district_id`, `name`, and PostGIS GEOMETRY (supports both POLYGON and MULTIPOLYGON) with a GiST spatial index. Uniqueness enforced on `(district_type, district_id)`.
+
+4. **`voter_district_assignments`** -- Tracks spatial comparison results for each voter across all district types. For every combination of voter + district_type, stores the voter roll value (`registered_value`) and the spatially-determined value (`spatial_district_id`, `spatial_district_name`), plus a mismatch flag. Uniqueness enforced on `(voter_id, district_type)`.
+
+5. **`county_commission_districts`** (legacy) -- Original county-commission-specific table, retained for backward compatibility. New analyses use `district_boundaries` instead.
+
+### Supported District Types
+
+The tool supports all 15 district types found in Georgia voter registration data:
+
+| District Type           | Voter Column                      | Example Use Case                  |
+| ----------------------- | --------------------------------- | --------------------------------- |
+| `county_precinct`       | `county_precinct`                 | County voting precincts           |
+| `congressional`         | `congressional_district`          | U.S. Congressional districts      |
+| `state_senate`          | `state_senate_district`           | Georgia State Senate districts    |
+| `state_house`           | `state_house_district`            | Georgia State House districts     |
+| `judicial`              | `judicial_district`               | Superior Court judicial circuits  |
+| `county_commission`     | `county_commission_district`      | County commission/board districts |
+| `school_board`          | `school_board_district`           | County school board districts     |
+| `city_council`          | `city_council_district`           | Municipal city council districts  |
+| `municipal_school_board`| `municipal_school_board_district` | City school board districts       |
+| `water_board`           | `water_board_district`            | Water authority districts         |
+| `super_council`         | `super_council_district`          | Special council districts         |
+| `super_commissioner`    | `super_commissioner_district`     | Special commissioner districts    |
+| `super_school_board`    | `super_school_board_district`     | Special school board districts    |
+| `fire`                  | `fire_district`                   | Fire protection districts         |
+| `municipality`          | `municipality`                    | Incorporated city boundaries      |
+
+Each district type can be imported independently using `import-geojson --district-type <type>` and compared using `compare-districts --district-type <type>`. The system automatically compares all types that have imported boundaries when `compare-districts` is run without specifying types.
 
 ### Multi-Service Geocoding
 
@@ -150,17 +186,23 @@ The cascading logic: Census runs first on all voters. Subsequent services only p
 
 ### Spatial Join (The Core Analysis)
 
-The district comparison uses a single PostGIS query:
+The district comparison uses a PostGIS spatial join for each district type:
 
 ```sql
-SELECT v.*, d.district_id, d.name
+SELECT DISTINCT ON (v.voter_registration_number)
+    v.voter_registration_number,
+    v.{district_column} AS registered_value,
+    d.district_id AS spatial_district_id,
+    d.name AS spatial_district_name
 FROM voters v
-LEFT JOIN county_commission_districts d
-  ON ST_Within(v.geom, d.geom)
+LEFT JOIN district_boundaries d
+  ON d.district_type = :district_type
+  AND ST_Within(v.geom, d.geom)
 WHERE v.geom IS NOT NULL
+ORDER BY v.voter_registration_number, d.district_id ASC
 ```
 
-This determines which district polygon each voter point falls within. The result is compared against the voter's `county_commission_district` field from the SOS file. Mismatches are flagged with `district_mismatch = true` and can be filtered, exported, or mapped.
+This determines which district polygon each voter point falls within for a given district type. The `compare-districts` command iterates through all district types that have imported boundaries (or a specified subset). For each type, it compares the voter's registration value against the spatially-determined district. Mismatches are stored in `voter_district_assignments` with `is_mismatch = true` and can be filtered, exported, or mapped.
 
 ### Interactive Map Generation
 
@@ -191,10 +233,10 @@ The `--redact-pii` flag strips voter names, specific addresses, and registration
 | `sync-geocode` | Write best geocode results to Voter geometry column |
 | `delete-geocode-results` | Remove geocode results for retry |
 | `validate-usps` | Validate addresses via USPS API |
-| `import-geojson <file>` | Import district boundaries from GeoJSON |
-| `compare-districts` | Spatial join to find district mismatches |
+| `import-geojson <file> --district-type <type>` | Import district boundaries from GeoJSON or shapefile for any district type |
+| `compare-districts [--district-type <types>]` | Spatial join to find mismatches across all district types (or specified subset) |
 | `export <file>` | Export to CSV, GeoJSON, or interactive Leaflet map |
-| `status` | Show geocoding/validation statistics |
+| `status` | Show geocoding/validation statistics and district tracking summary |
 | `db-migrate` | Generate Alembic migration from model changes |
 | `db-upgrade` | Apply database migrations |
 | `db-downgrade` | Rollback database migrations |
