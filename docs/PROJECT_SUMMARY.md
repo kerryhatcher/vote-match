@@ -1,8 +1,18 @@
+
+
+## Notes to Claude (REMOVE BEFORE PUBLISHING)
+
+Review [docs/prompt_notes.md](prompt_notes.md)
+
+!END OF NOTES TO CLAUDE!
+---
+
+
 # Vote Match: Voter-District Mismatch Analysis for Macon-Bibb County
 
 ## Context for Blog Post Authors
 
-This document provides the full background, motivation, methodology, and technical details of the Vote Match project. Use it as source material to write a narrative blog post about the project.
+This document provi# Vote Match: Voter-District Mismatch Analysis for Macon-Bibb Countydes the full background, motivation, methodology, and technical details of the Vote Match project. Use it as source material to write a narrative blog post about the project.
 
 ---
 
