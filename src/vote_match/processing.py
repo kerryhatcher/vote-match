@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -776,11 +777,23 @@ def process_geocoding_service(
     return stats
 
 
+def _clear_voter_geocode(voter: "Voter", update_legacy_fields: bool) -> None:
+    """Clear a voter's geometry and optionally legacy geocode fields."""
+    voter.geom = None
+    if update_legacy_fields:
+        voter.geocode_status = None
+        voter.geocode_match_type = None
+        voter.geocode_matched_address = None
+        voter.geocode_longitude = None
+        voter.geocode_latitude = None
+
+
 def sync_best_geocode_to_voters(
     session: Session,
     limit: Optional[int] = None,
     force_update: bool = False,
     update_legacy_fields: bool = True,
+    service_name: Optional[str] = None,
 ) -> dict[str, int]:
     """Sync best geocoding result to Voter table for QGIS display.
 
@@ -793,6 +806,7 @@ def sync_best_geocode_to_voters(
         limit: Maximum number of voters to process (None for all)
         force_update: If True, update even if geom already exists
         update_legacy_fields: If True, also update legacy geocode_* fields
+        service_name: If set, only consider results from this geocoding service
 
     Returns:
         Dictionary with statistics:
@@ -805,6 +819,7 @@ def sync_best_geocode_to_voters(
     stats = {
         "total_processed": 0,
         "updated": 0,
+        "cleared": 0,
         "skipped_no_results": 0,
         "skipped_no_coords": 0,
         "skipped_already_set": 0,
@@ -826,23 +841,51 @@ def sync_best_geocode_to_voters(
     voters = query.all()
     logger.info(
         f"Syncing best geocode results to {len(voters)} voters "
-        f"(force_update={force_update}, update_legacy_fields={update_legacy_fields})"
+        f"(force_update={force_update}, update_legacy_fields={update_legacy_fields}, "
+        f"service_name={service_name})"
     )
+
+    quality_order = ["exact", "interpolated", "approximate", "no_match", "failed"]
+
+    def _pick_best(results: list) -> Optional["GeocodeResult"]:
+        """Pick highest quality result from a list of GeocodeResults."""
+        if not results:
+            return None
+
+        def sort_key(result: "GeocodeResult") -> tuple[int, float]:
+            try:
+                rank = quality_order.index(result.status)
+            except ValueError:
+                rank = len(quality_order)
+            confidence = result.match_confidence if result.match_confidence else 0.0
+            return (rank, -confidence)
+
+        return sorted(results, key=sort_key)[0]
 
     for voter in voters:
         stats["total_processed"] += 1
 
-        # Get best geocode result using model property
-        best_result = voter.best_geocode_result
+        # Get best geocode result, optionally filtered by service
+        if service_name:
+            results = [r for r in voter.geocode_results if r.service_name == service_name]
+            best_result = _pick_best(results)
+        else:
+            best_result = voter.best_geocode_result
 
         if not best_result:
             stats["skipped_no_results"] += 1
+            if service_name and voter.geom is not None:
+                _clear_voter_geocode(voter, update_legacy_fields)
+                stats["cleared"] += 1
             logger.debug(f"Voter {voter.voter_registration_number} has no geocode results")
             continue
 
         # Check if result has valid coordinates
         if best_result.longitude is None or best_result.latitude is None:
             stats["skipped_no_coords"] += 1
+            if service_name and voter.geom is not None:
+                _clear_voter_geocode(voter, update_legacy_fields)
+                stats["cleared"] += 1
             logger.debug(
                 f"Voter {voter.voter_registration_number} best result has no coordinates "
                 f"(status={best_result.status})"
@@ -2069,6 +2112,15 @@ def generate_leaflet_map(
 # Generalized district boundary import / comparison
 # ---------------------------------------------------------------------------
 
+
+def _is_nan(value: object) -> bool:
+    """Check if a value is float NaN (common in shapefiles for null fields)."""
+    try:
+        return isinstance(value, float) and math.isnan(value)
+    except (TypeError, ValueError):
+        return False
+
+
 # Common property-name patterns for auto-detection of district ID and name
 _ID_CANDIDATES = [
     "DISTRICTID",
@@ -2293,8 +2345,9 @@ def import_district_boundaries(
                 did = props.get(id_property)
             else:
                 for cand in _ID_CANDIDATES:
-                    did = props.get(cand)
-                    if did is not None:
+                    val = props.get(cand)
+                    if val is not None and not _is_nan(val):
+                        did = val
                         break
 
             # Resolve name
@@ -2303,8 +2356,9 @@ def import_district_boundaries(
                 dname = props.get(name_property)
             else:
                 for cand in _NAME_CANDIDATES:
-                    dname = props.get(cand)
-                    if dname is not None:
+                    val = props.get(cand)
+                    if val is not None and not _is_nan(val):
+                        dname = val
                         break
 
             if did is None:
@@ -2313,6 +2367,10 @@ def import_district_boundaries(
                 continue
 
             did = str(did).strip()
+            if not did:
+                logger.warning(f"Feature {idx}: District ID is empty after conversion, skipping")
+                stats["skipped"] += 1
+                continue
             if not dname:
                 dname = f"{district_type} {did}"
 

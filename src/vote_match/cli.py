@@ -773,6 +773,12 @@ def sync_geocode(
         "--skip-legacy-fields",
         help="Don't update legacy geocode_* fields",
     ),
+    service: str | None = typer.Option(
+        None,
+        "--service",
+        "-s",
+        help="Only use results from this geocoding service (e.g., census, geocodio)",
+    ),
 ) -> None:
     """Sync best geocoding results to Voter table for QGIS display.
 
@@ -787,10 +793,11 @@ def sync_geocode(
         vote-match sync-geocode                    # Sync all voters without geometry
         vote-match sync-geocode --force            # Update all voters including those with geometry
         vote-match sync-geocode --limit 1000       # Process first 1000 voters
+        vote-match sync-geocode --service census --force  # Re-sync using only census results
     """
     logger.info(
         f"sync-geocode command called with limit={limit}, force_update={force_update}, "
-        f"skip_legacy_fields={skip_legacy_fields}"
+        f"skip_legacy_fields={skip_legacy_fields}, service={service}"
     )
 
     settings = get_settings()
@@ -809,6 +816,8 @@ def sync_geocode(
             else:
                 typer.echo("Strategy: Updating only voters without geometry")
 
+            if service:
+                typer.echo(f"Service filter: {service}")
             if limit:
                 typer.echo(f"Limit: {limit}")
             typer.echo("")
@@ -827,6 +836,7 @@ def sync_geocode(
                     limit=limit,
                     force_update=force_update,
                     update_legacy_fields=not skip_legacy_fields,
+                    service_name=service,
                 )
 
                 progress.update(task, completed=True)
@@ -847,6 +857,8 @@ def sync_geocode(
 
             table.add_row("Total Processed", str(stats["total_processed"]))
             table.add_row("Updated", str(stats["updated"]), style="green")
+            if stats["cleared"] > 0:
+                table.add_row("Cleared (No Service Result)", str(stats["cleared"]), style="red")
             table.add_row("Skipped (No Results)", str(stats["skipped_no_results"]), style="yellow")
             table.add_row("Skipped (No Coords)", str(stats["skipped_no_coords"]), style="yellow")
             if not force_update and stats["skipped_already_set"] > 0:
