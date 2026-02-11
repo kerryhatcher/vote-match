@@ -1930,11 +1930,13 @@ def generate_leaflet_map(
     # Query county boundary when filtering by a single county
     county_geojson = {"type": "FeatureCollection", "features": []}
     if county:
-        # Infer state FIPS from voter data to disambiguate counties with the same name
+        # Infer state FIPS from geocode results to disambiguate counties with the same name
         state_fips = session.execute(
             text(
-                "SELECT geocode_state_fips FROM voters"
-                " WHERE county = :county AND geocode_state_fips IS NOT NULL"
+                "SELECT gr.raw_response->>'state_fips'"
+                " FROM geocode_results gr"
+                " JOIN voters v ON v.voter_registration_number = gr.voter_id"
+                " WHERE v.county = :county AND gr.raw_response->>'state_fips' IS NOT NULL"
                 " LIMIT 1"
             ),
             {"county": county.strip().upper()},
