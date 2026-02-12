@@ -1,4 +1,7 @@
 sample.csv
+*.csv
+*.zip
+*.pdf
 logs/
 *.csv
 *.pdf
@@ -234,3 +237,4 @@ docs/2026-02-11_10-05.png
 docs/promt_notes.md
 docs/prompt_notes.md
 docs/signal-2026-02-10-090706.jpeg
+src/vote_match/config.py

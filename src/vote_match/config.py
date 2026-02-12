@@ -69,6 +69,7 @@ class GoogleMapsConfig(ServiceConfig):
     api_key: Optional[str] = None
     region: str = "us"
     timeout: int = 60
+    batch_size: int = 100
 
 
 class OpenCageConfig(ServiceConfig):
